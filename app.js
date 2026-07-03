@@ -2,7 +2,7 @@
   Mosque Manager Web V2 - GitHub Pages client
   ضع رابط Apps Script Web App هنا بعد النشر:
 */
-const API_URL = 'PASTE_APPS_SCRIPT_EXEC_URL_HERE';
+const API_URL = 'https://script.google.com/macros/s/AKfycbzrKgNTqp799ovtPFS08WB8m99BZP7f_ryTs1ckNbFcwnd4KOn3gaLUSPexkM8Ti-8I/exec';
 const APP_VERSION = 'web-v2.0';
 
 const state = { user:null, data:null, page:'dashboard', qr:null, currentFollowupRows:[] };
