@@ -1,96 +1,785 @@
-/*
-  Mosque Manager Web V2 - GitHub Pages client
-  ضع رابط Apps Script Web App هنا بعد النشر:
-*/
-const API_URL = 'https://script.google.com/macros/s/AKfycbzrKgNTqp799ovtPFS08WB8m99BZP7f_ryTs1ckNbFcwnd4KOn3gaLUSPexkM8Ti-8I/exec';
-const APP_VERSION = 'web-v2.0';
+/* The Golden Star - GitHub Pages + Apps Script Edition */
+const API_URL = 'https://script.google.com/macros/s/AKfycbztyDUtMktktR5sJwYQF-4VDUx3qTjapr3m9geGdwozyb8-XfaozROCWIUEiPur0Saq/exec'; // ضع رابط /exec من Apps Script هنا
+const SESSION_KEY = 'golden_star_session_excel_v2';
+let currentUser = null;
+let currentPage = 'dashboard';
+let qrScanner = null;
+let DB = null;
+const REMOVED_PAGES = new Set(['qrAttendance','absences']);
 
-const state = { user:null, data:null, page:'dashboard', qr:null, currentFollowupRows:[] };
-const $ = s => document.querySelector(s);
-const $$ = s => Array.from(document.querySelectorAll(s));
-const today = () => new Date().toISOString().slice(0,10);
-const nowTime = () => new Date().toLocaleTimeString('ar-SY',{hour:'2-digit',minute:'2-digit'});
-const uid = () => String(Date.now()) + Math.floor(Math.random()*1000);
-const esc = v => String(v ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const $ = id => document.getElementById(id);
+const today = () => new Date().toISOString().slice(0, 10);
+const nowAr = () => new Date().toLocaleString('ar-SY');
+const money = n => `${Number(n || 0).toLocaleString('ar-SY')} ل.س`;
+const defaultFee = () => Number(DB?.settings?.defaultFee || 0);
+const busFee = () => Number(DB?.settings?.busFee || 200000);
+const kitFee = () => Number(DB?.settings?.kitFee || 100000);
+const num = v => Number(v || 0);
+function normalizePhone(phone){ let p = String(phone||'').replace(/[^0-9]/g,''); if(p.startsWith('00')) p = p.slice(2); if(p.startsWith('0')) p = '963' + p.slice(1); return p; }
+function waLink(phone, msg){ const p = normalizePhone(phone); if(!p){ toast('رقم ولي الأمر غير موجود','error'); return; } window.open(`https://wa.me/${p}?text=${encodeURIComponent(msg)}`,'_blank'); }
+const esc = v => String(v ?? '').replace(/[&<>'"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));
+const uid = p => `${p}-${Date.now()}-${Math.random().toString(16).slice(2, 7)}`;
 
-async function api(action, data={}){
-  if(API_URL.includes('PASTE_')) throw new Error('لم يتم وضع رابط Apps Script داخل app.js');
-  const res = await fetch(API_URL, {method:'POST', body:JSON.stringify({action, data, token:localStorage.mm_token||''})});
-  const txt = await res.text();
-  let json; try{ json=JSON.parse(txt); }catch(e){ throw new Error('رد السيرفر غير صالح: '+txt.slice(0,140)); }
-  if(!json.ok) throw new Error(json.error || 'حدث خطأ');
-  if(json.token) localStorage.mm_token=json.token;
-  return json.data;
+function currentSubmitButton(e){ return e?.submitter || document.activeElement?.closest?.('button') || null; }
+function setBtnBusy(btn, text='جاري العمل...'){
+  if(!btn) return;
+  if(!btn.dataset.originalHtml) btn.dataset.originalHtml = btn.innerHTML;
+  btn.disabled = true;
+  btn.classList.add('is-busy');
+  btn.innerHTML = `<i class="fa-solid fa-spinner fa-spin"></i> ${esc(text)}`;
 }
-function toast(msg, bad=false){ let t=$('.toast'); if(!t){t=document.createElement('div');t.className='toast';document.body.appendChild(t)} t.textContent=msg;t.style.background=bad?'#c0392b':'#0f6b4f';t.classList.add('show');setTimeout(()=>t.classList.remove('show'),2800); }
-async function boot(){ renderLogin(); try{ const me=await api('me'); state.user=me.user; await load(); }catch(e){} }
-async function load(){ state.data = await api('bootstrap'); renderApp(); }
-function renderLogin(){ $('#app').innerHTML = `<div class="login-page"><div class="login-card"><h1>منصة الإدارة الذكية</h1><p>تسجيل الدخول إلى نظام المسجد والمعهد</p><div class="field"><label>اسم المستخدم</label><input id="u" value="admin"></div><br><div class="field"><label>كلمة المرور</label><input id="p" type="password" value="admin"></div><br><button class="btn" style="width:100%" onclick="login()">دخول</button></div></div>`; }
-async function login(){ try{ const data=await api('login',{username:$('#u').value.trim(),password:$('#p').value}); state.user=data.user; await load(); }catch(e){toast(e.message,true)} }
-function logout(){ localStorage.removeItem('mm_token'); state.user=null; state.data=null; renderLogin(); }
-function isAdmin(){return state.user?.role==='admin'} function isTeacher(){return state.user?.role==='teacher'} function isSupervisor(){return state.user?.role==='supervisor'}
-function teacherHalaqaIds(){ if(!isTeacher()) return null; const tid=state.user.teacher_id; return state.data.halaqat.filter(h=>String(h.teacher_id)===String(tid)).map(h=>String(h.id)); }
-function visibleStudents(){ let rows=state.data.students||[]; if(isTeacher()){ const hs=teacherHalaqaIds(); rows=rows.filter(s=>hs.includes(String(s.halaqa_id))); } return rows; }
-const navItems = [
- ['dashboard','لوحة التحكم','🏠'],['students','الطلاب','👥'],['search','البحث','🔎'],['attendance','الحضور','✅'],['late','المتأخرون','⏰'],['followups','المتابعة','📖'],['reports','التقارير','🖨️'],['teachers','المدرسون','👨‍🏫'],['halaqat','الحلقات','🕌'],['events','الفعاليات','🏆'],['users','المستخدمون','🔐'],['settings','الإعدادات','⚙️']
+function resetBtnBusy(btn){
+  if(!btn) return;
+  btn.disabled = false;
+  btn.classList.remove('is-busy');
+  if(btn.dataset.originalHtml){ btn.innerHTML = btn.dataset.originalHtml; delete btn.dataset.originalHtml; }
+}
+function setGlobalBusy(text='جاري العمل...'){
+  let bar = document.getElementById('globalBusyBar');
+  if(!bar){
+    bar = document.createElement('div');
+    bar.id = 'globalBusyBar';
+    bar.style.cssText = 'position:fixed;top:0;right:0;left:0;z-index:99999;background:linear-gradient(135deg,#d4af37,#f6d76b);color:#07111f;font-weight:900;text-align:center;padding:10px;font-family:Cairo,Arial;box-shadow:0 8px 25px rgba(0,0,0,.18)';
+    document.body.appendChild(bar);
+  }
+  bar.innerHTML = `<i class="fa-solid fa-spinner fa-spin"></i> ${esc(text)}`;
+}
+function clearGlobalBusy(){ const bar = document.getElementById('globalBusyBar'); if(bar) bar.remove(); }
+function parseLocalDate(dateStr){
+  const parts = String(dateStr || today()).split('-').map(Number);
+  if(parts.length >= 3 && parts.every(n => !isNaN(n))){
+    return new Date(parts[0], parts[1] - 1, parts[2]);
+  }
+  return new Date(dateStr || today());
+}
+function toIsoDateLocal(d){
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
+}
+function displayDate(dateStr){
+  if(!dateStr) return '';
+  const d = parseLocalDate(dateStr);
+  if(isNaN(d.getTime())) return String(dateStr);
+  return `${d.getDate()}/${d.getMonth() + 1}/${d.getFullYear()}`;
+}
+function calcExpireDate(dateStr, type){
+  const d = parseLocalDate(dateStr || today());
+  if(String(type||'').includes('سنوي')) d.setFullYear(d.getFullYear()+1); else d.setMonth(d.getMonth()+1);
+  return toIsoDateLocal(d);
+}
+function postFast(path, method, payload){
+  // إرسال سريع بدون انتظار رد Apps Script؛ يمنع تعليق الواجهة عندما يحفظ السيرفر ولا يرجع رسالة بسرعة.
+  try{
+    ensureApiUrl();
+    const iframeName = 'fast_iframe_' + Date.now() + '_' + Math.random().toString(16).slice(2);
+    const iframe = document.createElement('iframe');
+    iframe.name = iframeName;
+    iframe.style.display = 'none';
+    const form = document.createElement('form');
+    form.method = 'POST';
+    form.action = API_URL;
+    form.target = iframeName;
+    form.style.display = 'none';
+    const fields = { requestId:'fast_'+Date.now(), action:'api', path, method:method || 'POST', payload: JSON.stringify(payload || {}) };
+    Object.keys(fields).forEach(k => { const input=document.createElement('input'); input.type='hidden'; input.name=k; input.value=fields[k]; form.appendChild(input); });
+    document.body.appendChild(iframe); document.body.appendChild(form); form.submit();
+    setTimeout(()=>{ try{ iframe.remove(); form.remove(); }catch(e){} }, 9000);
+    return Promise.resolve({ ok:true, fast:true });
+  }catch(err){ return Promise.reject(err); }
+}
+function refreshDataInBackground(delay=6000){
+  setTimeout(async()=>{ try{ await loadData(); if(currentPage==='finance') finance(); if(currentPage==='players') renderPlayersTable(); if(currentPage==='dashboard') dashboard(); }catch(e){ console.warn('background sync failed', e); } }, delay);
+}
+function findPlayerByNameOrId(value){
+  const q = String(value||'').trim();
+  if(!q) return null;
+  return DB.players.find(p => String(p.id)===q || String(p.name)===q) || DB.players.find(p => String(p.name||'').includes(q));
+}
+
+function paymentMainPaid(p){ return num(p.mainAmount !== undefined && p.mainAmount !== '' ? p.mainAmount : p.amount); }
+function paymentBusIncluded(p){ return String(p.busIncluded || '').toLowerCase() === 'true' || String(p.busIncluded) === '1' || num(p.busAmount) > 0; }
+function paymentKitIncluded(p){ return String(p.kitIncluded || '').toLowerCase() === 'true' || String(p.kitIncluded) === '1' || num(p.kitAmount) > 0; }
+function paymentTotalPaid(p){
+  if(p.mainAmount !== undefined || p.busAmount !== undefined || p.kitAmount !== undefined){
+    return paymentMainPaid(p) + num(p.busAmount) + num(p.kitAmount);
+  }
+  return num(p.amount);
+}
+function paymentExtrasText(p){
+  const parts = [];
+  if(paymentBusIncluded(p)) parts.push(`باص: ${money(num(p.busAmount))}`);
+  if(paymentKitIncluded(p)) parts.push(`طقم: ${money(num(p.kitAmount))}`);
+  return parts.length ? parts.join(' / ') : 'لا يوجد';
+}
+function extrasNames(finance){
+  const parts = [];
+  if(finance.busSubscribed) parts.push('باص');
+  if(finance.kitSubscribed) parts.push('طقم رياضي');
+  return parts.length ? parts.join(' + ') : 'لا يوجد';
+}
+function playerOutstandingList(){
+  return (DB.players || []).map(player => ({ player, finance:getPlayerFinance(player) })).filter(x => x.finance.totalRemaining > 0);
+}
+
+const fallbackUsers = [
+  { username: 'admin', password: 'admin123', role: 'admin', displayName: 'المدير العام', permissions:'all', active:'1' },
+  { username: 'finance', password: 'finance123', role: 'finance', displayName: 'قسم المالية', permissions:'dashboard,finance,paymentsQuery', active:'1' }
 ];
-function allowedPage(p){ if(isAdmin()) return true; if(isSupervisor()) return ['dashboard','search','reports','followups','late'].includes(p); if(isTeacher()) return ['dashboard','search','attendance','late','followups'].includes(p); return false; }
-function renderApp(){ const nav=navItems.filter(([p])=>allowedPage(p)).map(([p,t,i])=>`<button class="${state.page===p?'active':''}" onclick="go('${p}')">${i} ${t}</button>`).join(''); $('#app').innerHTML=`<div class="app-shell"><aside class="sidebar"><div class="brand"><div class="logo">🕌</div><div><h1>${esc(state.data.settings.institution_name||'منصة الإدارة الذكية')}</h1><small>${esc(state.user.role)}</small></div></div><nav class="nav">${nav}<button onclick="logout()">🚪 خروج</button></nav></aside><main class="main"><div class="topbar"><h2 class="page-title">${pageTitle()}</h2><div class="userbox"><b>${esc(state.user.username)}</b><span class="badge">${roleName(state.user.role)}</span></div></div><div id="view"></div></main></div>`; renderPage(); }
-function go(p){ state.page=p; renderApp(); }
-function pageTitle(){ return Object.fromEntries(navItems.map(x=>[x[0],x[1]]))[state.page]||'' } function roleName(r){return {admin:'إدارة',teacher:'أستاذ',supervisor:'مشرف'}[r]||r}
-function renderPage(){ const v=$('#view'); const pages={dashboard,students,search,attendance,late,followups,reports,teachers,halaqat,events,users,settings}; (pages[state.page]||dashboard)(v); }
-function dashboard(v){ const students=visibleStudents(); const att=(state.data.attendance||[]).filter(a=>a.date===today()); const ids=new Set(students.map(s=>String(s.id))); const todayAtt=att.filter(a=>ids.has(String(a.student_id)) && a.status==='حاضر').length; const todayAbs=att.filter(a=>ids.has(String(a.student_id)) && (a.status||'').includes('غائب')).length; v.innerHTML=`<div class="grid"><div class="card stat"><div><span>${isTeacher()?'طلاب حلقتي':'إجمالي الطلاب'}</span><b>${students.length}</b></div>👥</div><div class="card stat"><div><span>الحاضرون اليوم</span><b>${todayAtt}</b></div>✅</div><div class="card stat"><div><span>الغائبون اليوم</span><b>${todayAbs}</b></div>❌</div>${!isTeacher()?`<div class="card stat"><div><span>المدرسون</span><b>${state.data.teachers.length}</b></div>👨‍🏫</div>`:''}</div><div class="card section"><h3>تنبيه تشغيل</h3><p>نسخة الويب تعمل عبر Google Apps Script و Google Sheets. لا تحتاج Python أو تشغيل لابتوب كسيرفر بعد النشر.</p></div>`; }
-function students(v){ if(!isAdmin()) return search(v); v.innerHTML=`<div class="toolbar"><button class="btn" onclick="studentForm()">إضافة طالب</button><input id="studentQ" placeholder="بحث بالاسم" oninput="studentsTable()"></div><div id="studentsTable"></div>`; studentsTable(); }
-function studentsTable(){ const q=($('#studentQ')?.value||'').trim(); const rows=(state.data.students||[]).filter(s=>!q||s.name?.includes(q)); $('#studentsTable').innerHTML=table(['ID','الصورة','الاسم','الحلقة','ولي الأمر','الحالة','إجراءات'],rows.map(s=>[s.id,photo(s.photo_url,46),esc(s.name),halaqaName(s.halaqa_id),waLink(s.guardian_phone,'فتح واتساب'),badge(s.status||'نشط'),`<button class="btn secondary" onclick="studentProfile('${s.id}')">ملف</button> <button class="btn secondary" onclick="qrCard('${s.id}')">بطاقة QR</button> <button class="btn gold" onclick="studentForm('${s.id}')">تعديل</button> <button class="btn danger" onclick="delRow('students','${s.id}')">حذف</button>`])); }
-function search(v){ const rows=visibleStudents(); v.innerHTML=`<div class="card"><div class="table-wrap">${table(['اسم الطالب','رقم ولي الأمر','الحالة','ملف'],rows.map(s=>[esc(s.name),esc(s.guardian_phone||''),badge(s.status||'نشط'),`<button class="btn secondary" onclick="studentProfile('${s.id}')">ملف</button>${isAdmin()?` <button class="btn secondary" onclick="qrCard('${s.id}')">بطاقة QR</button>`:''}`]))}</div></div>`; }
-function studentForm(id=''){ const s=state.data.students.find(x=>String(x.id)===String(id))||{}; const modal=showModal(`<h3>${id?'تعديل':'إضافة'} طالب</h3><div class="form"><div class="field"><label>ID</label><input id="sid" value="${esc(s.id||nextStudentId())}" ${id?'readonly':''}></div><div class="field"><label>الاسم</label><input id="sname" value="${esc(s.name)}"></div><div class="field"><label>الحلقة</label><select id="shalaqa">${state.data.halaqat.map(h=>`<option value="${h.id}" ${String(h.id)===String(s.halaqa_id)?'selected':''}>${esc(h.name)}</option>`)}</select></div><div class="field"><label>رقم ولي الأمر</label><input id="sguard" value="${esc(s.guardian_phone)}"></div><div class="field"><label>الصف</label><input id="sgrade" value="${esc(s.grade)}"></div><div class="field"><label>الحالة</label><select id="sstatus"><option ${s.status!=='مفصول'?'selected':''}>نشط</option><option ${s.status==='مفصول'?'selected':''}>مفصول</option></select></div><div class="field"><label>صورة الطالب</label><input id="sphoto" type="file" accept="image/*" capture="environment" onchange="previewPhoto(this)"></div><div class="field"><label>معاينة</label><img id="sphotoPreview" class="student-photo" src="${s.photo_url||''}" onerror="this.src=''" /></div><div class="field" style="grid-column:1/-1"><label>ملاحظات</label><textarea id="snotes">${esc(s.notes)}</textarea></div></div><br><button class="btn" onclick="saveStudent('${id}')">حفظ</button>`); }
-function nextStudentId(){ const n=Number(state.data.settings.next_student_id||100001); return n||Date.now(); }
-function previewPhoto(inp){ const f=inp.files[0]; if(!f) return; const r=new FileReader(); r.onload=()=>$('#sphotoPreview').src=r.result; r.readAsDataURL(f); }
-async function saveStudent(oldId){ try{ const photo=$('#sphotoPreview').src.startsWith('data:')?$('#sphotoPreview').src:($('#sphotoPreview').getAttribute('src')||''); const data={id:$('#sid').value.trim(),name:$('#sname').value.trim(),halaqa_id:$('#shalaqa').value,guardian_phone:$('#sguard').value,grade:$('#sgrade').value,status:$('#sstatus').value,notes:$('#snotes').value,photo_data:photo,old_id:oldId}; await api('saveStudent',data); toast('تم حفظ الطالب'); closeModal(); await load(); }catch(e){toast(e.message,true)} }
-function studentProfile(id){ const s=state.data.students.find(x=>String(x.id)===String(id)); if(!s) return; const fs=(state.data.followups||[]).filter(f=>String(f.student_id)===String(id)).sort((a,b)=>(b.date||'').localeCompare(a.date||'')); const ev=eventResultsFor(id); showModal(`<div class="profile"><div><img class="student-photo" src="${esc(s.photo_url||'')}" onerror="this.style.display='none'"></div><div><h2>${esc(s.name)}</h2><div class="kv"><div><b>ID</b><br>${esc(s.id)}</div><div><b>الحلقة</b><br>${halaqaName(s.halaqa_id)}</div><div><b>ولي الأمر</b><br>${esc(s.guardian_phone||'')}</div><div><b>الحالة</b><br>${esc(s.status||'نشط')}</div><div><b>الصف</b><br>${esc(s.grade||'')}</div><div><b>ملاحظات</b><br>${esc(s.notes||'')}</div></div></div></div><hr><h3>آخر متابعة</h3>${fs[0]?followupDetails(fs[0]):'<p>لا يوجد متابعة.</p>'}<h3>الفعاليات</h3>${ev.length?table(['الفعالية','نسبة الإنجاز'],ev.map(x=>[esc(x.name),x.percent+'%'])):'<p>لا توجد مشاركات.</p>'}<div class="no-print">${isAdmin()?'<button class="btn" onclick="window.print()">طباعة</button>':''}</div>`); }
-function followupDetails(f){ let extra=''; try{ const o=JSON.parse(f.fields_json||'{}'); extra=Object.entries(o).map(([k,v])=>`<div><b>${esc(k)}</b><br>${esc(v)}</div>`).join(''); }catch(e){} return `<div class="kv"><div><b>التاريخ</b><br>${esc(f.date)}</div><div><b>الحالة</b><br>${esc(f.status||'')}</div>${extra}</div>`; }
-function attendance(v){ const rows=visibleStudents(); v.innerHTML=`<div class="card"><div class="toolbar"><button class="btn" onclick="openQrScanner('attendance')">فتح قارئ QR</button><input id="manualStudent" placeholder="ID أو اسم الطالب"><button class="btn secondary" onclick="markManualPresent()">تسجيل يدوي حاضر</button><button class="btn gold" onclick="saveAttendanceBulk()">حفظ جماعي</button></div><div class="table-wrap">${table(['الطالب','الحالة'],rows.map(s=>[esc(s.name),`<select data-att="${s.id}"><option value="">اختر</option><option>حاضر</option><option>غائب</option><option>غياب مبرر</option><option>لم يسمع شيئاً</option></select>`]))}</div></div><div id="qrBox"></div>`; }
-function markManualPresent(){ const q=$('#manualStudent').value.trim(); const s=visibleStudents().find(x=>String(x.id)===q || (x.name||'').includes(q)); if(!s) return toast('لم يتم العثور على الطالب',true); document.querySelector(`[data-att="${s.id}"]`).value='حاضر'; toast('تم تحديد الطالب حاضر'); }
-async function saveAttendanceBulk(){ try{ const rows=$$('[data-att]').map(el=>({student_id:el.dataset.att,status:el.value})).filter(x=>x.status); await api('saveAttendanceBulk',{date:today(),time:nowTime(),rows}); toast('تم حفظ الحضور'); await load(); }catch(e){toast(e.message,true)} }
-function openQrScanner(mode,eventId='',slot=''){ const box=$('#qrBox')||document.body.appendChild(document.createElement('div')); box.innerHTML='<div class="card section"><div id="reader" style="max-width:420px"></div><button class="btn secondary" onclick="stopQr()">إغلاق</button></div>'; if(!window.Html5Qrcode) return toast('مكتبة QR غير متاحة',true); state.qr = new Html5Qrcode('reader'); state.qr.start({facingMode:'environment'},{fps:10,qrbox:250}, txt=>handleQr(txt,mode,eventId,slot)).catch(e=>toast('تعذر فتح الكاميرا: '+e,true)); }
-function stopQr(){ if(state.qr){ state.qr.stop().catch(()=>{}); state.qr=null; } $('#qrBox') && ($('#qrBox').innerHTML=''); }
-function parseStudentCode(txt){ return String(txt).replace('STUDENT:','').trim(); }
-async function handleQr(txt,mode,eventId,slot){ const id=parseStudentCode(txt); if(mode==='attendance'){ const el=document.querySelector(`[data-att="${id}"]`); if(el){ el.value='حاضر'; toast('تمت قراءة الطالب'); } else toast('الطالب ليس ضمن الحلقة',true); } if(mode==='event'){ try{ await api('eventCheckin',{event_id:eventId,slot,student_id:id,date:today(),time:nowTime()}); toast('تم تسجيل قراءة الفعالية'); await load(); }catch(e){toast(e.message,true)} } }
-function late(v){ const rows=(state.data.late||[]).filter(x=>isAdmin() || visibleStudents().some(s=>String(s.id)===String(x.student_id))); v.innerHTML=`<div class="toolbar"><input id="lateQ" placeholder="اسم أو ID"><button class="btn" onclick="lateManual()">تسجيل متأخر</button>${isAdmin()?'<button class="btn secondary" onclick="window.print()">طباعة</button>':''}</div><div class="table-wrap">${table(['التاريخ','الوقت','الاسم','الحلقة','ID','واتساب'],rows.map(l=>{const s=state.data.students.find(x=>String(x.id)===String(l.student_id))||{};return [l.date,l.time,esc(s.name),halaqaName(s.halaqa_id),l.student_id,waLate(s,l.time)]}))}</div>`; }
-async function lateManual(){ const q=$('#lateQ').value.trim(); const s=visibleStudents().find(x=>String(x.id)===q || (x.name||'').includes(q)); if(!s) return toast('لم يتم العثور على الطالب',true); try{ await api('saveLate',{student_id:s.id,date:today(),time:nowTime()}); toast('تم تسجيل التأخير'); await load(); }catch(e){toast(e.message,true)} }
-function followups(v){ if(isAdmin()||isSupervisor()) return followupReports(v); const rows=visibleStudents(); v.innerHTML=`<div class="toolbar"><button class="btn gold" onclick="saveFollowupsBulk()">حفظ جماعي</button></div><div class="table-wrap">${table(['الطالب','قرآن','تقييم','حديث','تقييم','متن','تقييم','حالة','ملاحظات'],rows.map(s=>[esc(s.name),`<input data-f="${s.id}:quran">`,`<select data-f="${s.id}:q_eval"><option></option><option>ممتاز</option><option>جيد</option><option>إعادة</option></select>`,`<input data-f="${s.id}:hadith">`,`<select data-f="${s.id}:h_eval"><option></option><option>ممتاز</option><option>جيد</option><option>إعادة</option></select>`,`<input data-f="${s.id}:matn">`,`<select data-f="${s.id}:m_eval"><option></option><option>ممتاز</option><option>جيد</option><option>إعادة</option></select>`,`<select data-f="${s.id}:status"><option></option><option>لم يسمع شيئاً</option><option>غياب مبرر</option></select>`,`<input data-f="${s.id}:notes">`]))}</div>`; }
-async function saveFollowupsBulk(){ const map={}; $$('[data-f]').forEach(el=>{const [id,k]=el.dataset.f.split(':'); map[id]=map[id]||{}; map[id][k]=el.value;}); const rows=Object.entries(map).map(([student_id,x])=>({student_id,date:today(),fields_json:JSON.stringify(x),status:x.status||'',teacher_id:state.user.teacher_id||''})).filter(x=>Object.values(JSON.parse(x.fields_json)).some(Boolean)); try{ await api('saveFollowupsBulk',{rows}); toast('تم حفظ المتابعة'); await load(); }catch(e){toast(e.message,true)} }
-function followupReports(v){ const hs=state.data.halaqat; v.innerHTML=`<div class="toolbar no-print"><select id="frH"><option value="">كل الحلقات</option>${hs.map(h=>`<option value="${h.id}">${esc(h.name)}</option>`)}</select><input id="frS" placeholder="اسم أو ID الطالب"><input type="date" id="frFrom"><input type="date" id="frTo"><button class="btn" onclick="renderFollowupReport()">عرض</button><button class="btn secondary" onclick="window.print()">طباعة</button></div><div id="followupReport"></div>`; renderFollowupReport(); }
-function renderFollowupReport(){ const hid=$('#frH')?.value||''; const q=$('#frS')?.value||''; const from=$('#frFrom')?.value||''; const to=$('#frTo')?.value||''; let fs=state.data.followups||[]; if(from) fs=fs.filter(f=>f.date>=from); if(to) fs=fs.filter(f=>f.date<=to); let students=state.data.students.filter(s=>(!hid||String(s.halaqa_id)===String(hid))&&(!q||String(s.id)===q||s.name?.includes(q))); const ids=new Set(students.map(s=>String(s.id))); fs=fs.filter(f=>ids.has(String(f.student_id))); const title=hid?halaqaName(hid):'كل الحلقات'; $('#followupReport').innerHTML=`<div class="card"><div class="print-head"><h2>جدول متابعة الطلاب</h2><div class="meta"><span>${esc(title)}</span><span>التاريخ: ${today()}</span></div><div class="watermark">🕌</div></div><div class="table-wrap">${table(['التاريخ','اسم الطالب','قرآن','تقييم','حديث','تقييم','متن','تقييم','ملاحظات'],fs.map(f=>{let o={};try{o=JSON.parse(f.fields_json||'{}')}catch(e){} const s=state.data.students.find(x=>String(x.id)===String(f.student_id))||{}; return [f.date,esc(s.name),esc(o.quran||''),stateBadge(o.q_eval),esc(o.hadith||''),stateBadge(o.h_eval),esc(o.matn||''),stateBadge(o.m_eval),''];}))}</div></div>`; }
-function reports(v){ followupReports(v); }
-function teachers(v){ if(!isAdmin()) return; v.innerHTML=`<div class="toolbar"><button class="btn" onclick="teacherForm()">إضافة مدرس</button></div><div class="table-wrap">${table(['ID','الاسم','الهاتف','إجراءات'],state.data.teachers.map(t=>[t.id,esc(t.name),esc(t.phone||''),`<button class="btn gold" onclick="teacherForm('${t.id}')">تعديل</button>`]))}</div>`; }
-function teacherForm(id=''){ const t=state.data.teachers.find(x=>String(x.id)===String(id))||{}; showModal(`<h3>${id?'تعديل':'إضافة'} مدرس</h3><div class="form"><div class="field"><label>ID</label><input id="tid" value="${esc(t.id||uid())}" ${id?'readonly':''}></div><div class="field"><label>الاسم</label><input id="tname" value="${esc(t.name)}"></div><div class="field"><label>الهاتف</label><input id="tphone" value="${esc(t.phone)}"></div></div><br><button class="btn" onclick="saveTeacher('${id}')">حفظ</button>`); }
-async function saveTeacher(id){ try{ await api('saveGeneric',{table:'teachers',row:{id:$('#tid').value,name:$('#tname').value,phone:$('#tphone').value}}); toast('تم الحفظ'); closeModal(); await load(); }catch(e){toast(e.message,true)} }
-function halaqat(v){ if(!isAdmin()) return; v.innerHTML=`<div class="toolbar"><button class="btn" onclick="halaqaForm()">إضافة حلقة</button></div><div class="table-wrap">${table(['ID','الحلقة','الأستاذ','عدد الطلاب'],state.data.halaqat.map(h=>[h.id,esc(h.name),teacherName(h.teacher_id),state.data.students.filter(s=>String(s.halaqa_id)===String(h.id)).length]))}</div>`; }
-function halaqaForm(){ showModal(`<h3>إضافة حلقة</h3><div class="form"><div class="field"><label>ID</label><input id="hid" value="${uid()}"></div><div class="field"><label>اسم الحلقة</label><input id="hname"></div><div class="field"><label>الأستاذ</label><select id="hteacher">${state.data.teachers.map(t=>`<option value="${t.id}">${esc(t.name)}</option>`)}</select></div></div><br><button class="btn" onclick="saveHalaqa()">حفظ</button>`); }
-async function saveHalaqa(){ try{ await api('saveGeneric',{table:'halaqat',row:{id:$('#hid').value,name:$('#hname').value,teacher_id:$('#hteacher').value}}); closeModal(); await load(); }catch(e){toast(e.message,true)} }
-function events(v){ if(!isAdmin()) return; v.innerHTML=`<div class="toolbar"><button class="btn" onclick="eventForm()">إضافة فعالية</button></div><div class="table-wrap">${table(['الفعالية','الفترة','الحالة','إجراءات'],state.data.events.map(e=>[esc(e.name),`${e.start_date} إلى ${e.end_date}`,badge(e.status||'تسجيل'),`<button class="btn secondary" onclick="eventOpen('${e.id}')">فتح</button>`]))}</div>`; }
-function eventForm(){ showModal(`<h3>إضافة فعالية</h3><div class="form"><div class="field"><label>اسم الفعالية</label><input id="ename"></div><div class="field"><label>من تاريخ</label><input type="date" id="estart"></div><div class="field"><label>إلى تاريخ</label><input type="date" id="eend"></div><div class="field"><label>أسماء القراءات اليومية مفصولة بفاصلة</label><input id="eslots" value="الفجر,الظهر,العصر,المغرب,العشاء"></div></div><br><button class="btn" onclick="saveEvent()">حفظ</button>`); }
-async function saveEvent(){ try{ await api('saveGeneric',{table:'events',row:{id:uid(),name:$('#ename').value,start_date:$('#estart').value,end_date:$('#eend').value,slots:$('#eslots').value,status:'تسجيل'}}); closeModal(); await load(); }catch(e){toast(e.message,true)} }
-function eventOpen(id){ const e=state.data.events.find(x=>String(x.id)===String(id)); const parts=state.data.event_participants.filter(p=>String(p.event_id)===String(id)); const slots=(e.slots||'قراءة أولى').split(',').map(x=>x.trim()).filter(Boolean); showModal(`<h2>${esc(e.name)}</h2>${e.status!=='بدأت'?`<div class="card"><h3>تسجيل المشاركين</h3><input id="epq" placeholder="ID الطالب"><button class="btn" onclick="addParticipant('${id}')">إضافة مشارك</button><button class="btn gold" onclick="startEvent('${id}')">بدء الفعالية</button></div>`:''}<div class="card section"><h3>تسجيل القراءات</h3><select id="slotSel">${slots.map(s=>`<option>${esc(s)}</option>`)}</select><input id="evStudent" placeholder="ID الطالب"><button class="btn" onclick="eventManual('${id}')">تسجيل</button><button class="btn secondary" onclick="openQrScanner('event','${id}',$('#slotSel').value)">قارئ QR</button></div><h3>المشاركون</h3>${table(['ID','الاسم','نسبة الإنجاز'],parts.map(p=>{const s=state.data.students.find(x=>String(x.id)===String(p.student_id))||{};return[p.student_id,esc(s.name),eventPercent(id,p.student_id)+'%']}))}`); }
-async function addParticipant(event_id){ try{ await api('saveGeneric',{table:'event_participants',row:{id:uid(),event_id,student_id:$('#epq').value.trim()}}); toast('تمت الإضافة'); await load(); eventOpen(event_id); }catch(e){toast(e.message,true)} }
-async function startEvent(event_id){ try{ const e=state.data.events.find(x=>String(x.id)===String(event_id)); e.status='بدأت'; await api('saveGeneric',{table:'events',row:e}); toast('تم بدء الفعالية'); await load(); eventOpen(event_id); }catch(e){toast(e.message,true)} }
-async function eventManual(event_id){ try{ await api('eventCheckin',{event_id,slot:$('#slotSel').value,student_id:$('#evStudent').value.trim(),date:today(),time:nowTime()}); toast('تم التسجيل'); await load(); eventOpen(event_id); }catch(e){toast(e.message,true)} }
-function users(v){ if(!isAdmin()) return; v.innerHTML=`<div class="toolbar"><button class="btn" onclick="userForm()">إضافة مستخدم</button></div><div class="table-wrap">${table(['المستخدم','الدور','ربط مدرس','حالة'],state.data.users.map(u=>[esc(u.username),roleName(u.role),teacherName(u.teacher_id),badge(u.active!=='لا'?'نشط':'معطل')]))}</div>`; }
-function userForm(){ showModal(`<h3>إضافة مستخدم</h3><div class="form"><div class="field"><label>اسم المستخدم</label><input id="un"></div><div class="field"><label>كلمة المرور</label><input id="up"></div><div class="field"><label>الدور</label><select id="ur"><option value="teacher">أستاذ</option><option value="supervisor">مشرف</option><option value="admin">إدارة</option></select></div><div class="field"><label>ربط بمدرس</label><select id="ut"><option value=""></option>${state.data.teachers.map(t=>`<option value="${t.id}">${esc(t.name)}</option>`)}</select></div></div><br><button class="btn" onclick="saveUser()">حفظ</button>`); }
-async function saveUser(){ try{ await api('saveUser',{username:$('#un').value,password:$('#up').value,role:$('#ur').value,teacher_id:$('#ut').value,active:'نعم'}); closeModal(); await load(); }catch(e){toast(e.message,true)} }
-function settings(v){ if(!isAdmin()) return; v.innerHTML=`<div class="card"><h3>إعدادات المؤسسة</h3><div class="form"><div class="field"><label>اسم المؤسسة</label><input id="setName" value="${esc(state.data.settings.institution_name||'')}"></div><div class="field"><label>وصف قصير</label><input id="setDesc" value="${esc(state.data.settings.description||'')}"></div><div class="field"><label>نص الختم</label><input id="setStamp" value="${esc(state.data.settings.stamp_text||'')}"></div><div class="field"><label>بداية ID</label><input id="setStart" value="${esc(state.data.settings.student_id_start||100001)}"></div><div class="field"><label>نهاية ID</label><input id="setEnd" value="${esc(state.data.settings.student_id_end||101111)}"></div><div class="field"><label>ID الطالب القادم</label><input id="setNext" value="${esc(state.data.settings.next_student_id||100001)}"></div><div class="field"><label>شعار المؤسسة</label><input id="setLogo" type="file" accept="image/*" onchange="previewLogo(this)"></div></div><br><img id="logoPreview" src="${esc(state.data.settings.logo_url||'')}" style="max-width:150px"><br><br><button class="btn" onclick="saveSettings()">حفظ الإعدادات</button></div><div class="card section"><h3>روابط النشر</h3><p>بعد رفع الواجهة على GitHub Pages، ضع الرابط هنا في إعدادات المشروع أو شاركه مع الأساتذة.</p><code>https://USERNAME.github.io/REPOSITORY/</code></div>`; }
-function previewLogo(inp){ const f=inp.files[0]; if(!f)return; const r=new FileReader(); r.onload=()=>$('#logoPreview').src=r.result; r.readAsDataURL(f); }
-async function saveSettings(){ try{ const settings={institution_name:$('#setName').value,description:$('#setDesc').value,stamp_text:$('#setStamp').value,student_id_start:$('#setStart').value,student_id_end:$('#setEnd').value,next_student_id:$('#setNext').value,logo_data:$('#logoPreview').src.startsWith('data:')?$('#logoPreview').src:''}; await api('saveSettings',settings); toast('تم حفظ الإعدادات'); await load(); }catch(e){toast(e.message,true)} }
-function table(head, rows){return `<table class="table"><thead><tr>${head.map(h=>`<th>${h}</th>`).join('')}</tr></thead><tbody>${rows.map(r=>`<tr>${r.map(c=>`<td>${c??''}</td>`).join('')}</tr>`).join('')}</tbody></table>`}
-function badge(x){return `<span class="badge ${String(x).includes('غائب')?'danger':''}">${esc(x)}</span>`} function stateBadge(x){ let c=x==='إعادة'?'danger':(x==='جيد'?'warn':''); return `<span class="badge ${c}">${esc(x||'')}</span>`; }
-function photo(src,s=40){return src?`<img src="${esc(src)}" style="width:${s}px;height:${s}px;object-fit:cover;border-radius:12px">`:'—'}
-function halaqaName(id){return esc((state.data.halaqat.find(h=>String(h.id)===String(id))||{}).name||'')} function teacherName(id){return esc((state.data.teachers.find(t=>String(t.id)===String(id))||{}).name||'')}
-function waLink(phone,text){ if(!phone) return ''; return `<a class="btn secondary" target="_blank" href="https://wa.me/${String(phone).replace(/\D/g,'')}">${text}</a>` }
-function waLate(s,time){ const msg=encodeURIComponent(`السلام عليكم ورحمة الله\nإن ابنكم: ${s.name}\nجاء إلى الحلقة متأخراً في تمام الساعة: ${time}`); return s.guardian_phone?`<a class="btn secondary" target="_blank" href="https://wa.me/${String(s.guardian_phone).replace(/\D/g,'')}?text=${msg}">واتساب</a>`:''; }
-async function delRow(table,id){ if(!confirm('تأكيد الحذف؟'))return; try{await api('deleteRow',{table,id});toast('تم الحذف');await load();}catch(e){toast(e.message,true)} }
-function showModal(html){ let m=$('.modal'); if(!m){m=document.createElement('div');m.className='modal';document.body.appendChild(m)} m.innerHTML=`<div class="modal-box"><button class="close" onclick="closeModal()">×</button>${html}</div>`; m.classList.add('show'); m.onclick=e=>{if(e.target===m)closeModal()}; return m; } function closeModal(){ $('.modal')?.classList.remove('show'); stopQr(); } document.addEventListener('keydown',e=>{if(e.key==='Escape')closeModal()});
-function qrCard(id){ const s=state.data.students.find(x=>String(x.id)===String(id)); showModal(`<h2>بطاقة QR</h2><div style="text-align:center"><div id="qrPrint" style="display:inline-block;padding:20px;border:1px solid #ddd;border-radius:18px"><h3>${esc(s.name)}</h3><p>ID: ${esc(s.id)}</p><img src="https://api.qrserver.com/v1/create-qr-code/?size=180x180&data=STUDENT:${encodeURIComponent(s.id)}"><p>${esc(state.data.settings.institution_name||'')}</p></div><br><button class="btn" onclick="window.print()">طباعة</button></div>`); }
-function eventPercent(event_id,student_id){ const e=state.data.events.find(x=>String(x.id)===String(event_id)); if(!e)return 0; const slots=(e.slots||'').split(',').filter(Boolean).length||1; const days=Math.max(1,Math.round((new Date(e.end_date)-new Date(e.start_date))/(86400000))+1||1); const total=slots*days; const done=new Set(state.data.event_attendance.filter(a=>String(a.event_id)===String(event_id)&&String(a.student_id)===String(student_id)).map(a=>a.date+'|'+a.slot)).size; return Math.min(100,Math.round(done*100/total)); }
-function eventResultsFor(student_id){ return state.data.event_participants.filter(p=>String(p.student_id)===String(student_id)).map(p=>{const e=state.data.events.find(x=>String(x.id)===String(p.event_id))||{};return {name:e.name||'',percent:eventPercent(p.event_id,student_id)}}); }
-boot();
+const menuItems = [
+  { id:'dashboard', title:'الرئيسية', icon:'fa-chart-pie', roles:['admin','finance'] },
+  { id:'players', title:'شؤون اللاعبين', icon:'fa-person-running', roles:['admin'] },
+  { id:'finance', title:'المالية والمحاسبة', icon:'fa-wallet', roles:['admin','finance'] },
+  { id:'paymentsQuery', title:'الاستعلام عن الدفعات', icon:'fa-magnifying-glass-dollar', roles:['admin','finance'] },
+  { id:'supervisors', title:'المشرفون والصلاحيات', icon:'fa-users-gear', roles:['admin'] },
+  { id:'settings', title:'إعدادات المؤسسة', icon:'fa-gear', roles:['admin'] }
+];
+
+
+
+(function injectBusyStyle(){
+  const st = document.createElement('style');
+  st.textContent = `.btn.is-busy{opacity:.8;cursor:wait!important;pointer-events:none}.btn.is-busy i{margin-inline-end:4px}`;
+  document.head.appendChild(st);
+})();
+
+function userList(){ return (DB?.users?.length ? DB.users : fallbackUsers).map(u => ({...u, name: u.displayName || u.name || u.username})); }
+function userPerms(u){ return String(u?.permissions || '').split(',').map(x=>x.trim()).filter(Boolean); }
+function isActiveUser(u){ return String(u?.active ?? '1') !== '0'; }
+function canAccess(page){
+  if(REMOVED_PAGES.has(page)) return false;
+  if(!currentUser) return false;
+  if(currentUser.role === 'admin' || currentUser.permissions === 'all') return true;
+  return userPerms(currentUser).includes(page);
+}
+function ensureApiUrl(){
+  if(!API_URL || API_URL.includes('PASTE_APPS_SCRIPT_EXEC_URL_HERE')){
+    throw new Error('لم يتم وضع رابط Apps Script داخل ملف app.js');
+  }
+}
+function jsonpRequest(path){
+  ensureApiUrl();
+  return new Promise((resolve, reject) => {
+    const cb = 'gs_cb_' + Date.now() + '_' + Math.random().toString(16).slice(2);
+    const url = API_URL + '?action=api&path=' + encodeURIComponent(path) + '&callback=' + encodeURIComponent(cb) + '&_=' + Date.now();
+    const s = document.createElement('script');
+    const timer = setTimeout(() => { cleanup(); reject(new Error('انتهت مهلة الاتصال بالسيرفر')); }, 30000);
+    function cleanup(){ clearTimeout(timer); delete window[cb]; if(s.parentNode) s.parentNode.removeChild(s); }
+    window[cb] = data => { cleanup(); data && data.error ? reject(new Error(data.error)) : resolve(data || {}); };
+    s.onerror = () => { cleanup(); reject(new Error('فشل الاتصال بسيرفر Apps Script')); };
+    s.src = url;
+    document.body.appendChild(s);
+  });
+}
+function postToAppsScript(path, method, payload){
+  ensureApiUrl();
+  return new Promise((resolve, reject) => {
+    const requestId = 'req_' + Date.now() + '_' + Math.random().toString(16).slice(2);
+    const iframeName = 'iframe_' + requestId;
+    const iframe = document.createElement('iframe');
+    iframe.name = iframeName;
+    iframe.style.display = 'none';
+    const form = document.createElement('form');
+    form.method = 'POST';
+    form.action = API_URL;
+    form.target = iframeName;
+    form.style.display = 'none';
+    const fields = { requestId, action:'api', path, method:method || 'POST', payload: JSON.stringify(payload || {}) };
+    Object.keys(fields).forEach(k => {
+      const input = document.createElement('input');
+      input.type = 'hidden'; input.name = k; input.value = fields[k];
+      form.appendChild(input);
+    });
+    const timer = setTimeout(() => { cleanup(); reject(new Error('انتهت مهلة حفظ البيانات في السيرفر')); }, 60000);
+    function cleanup(){ clearTimeout(timer); window.removeEventListener('message', onMessage); setTimeout(()=>{ iframe.remove(); form.remove(); }, 50); }
+    function onMessage(e){
+      const data = e.data || {};
+      if(!data || data.requestId !== requestId) return;
+      cleanup();
+      if(data.error) reject(new Error(data.error)); else resolve(data.result || {});
+    }
+    window.addEventListener('message', onMessage);
+    document.body.appendChild(iframe);
+    document.body.appendChild(form);
+    form.submit();
+  });
+}
+async function api(path, options={}){
+  const method = String(options.method || 'GET').toUpperCase();
+  if(method === 'GET') return jsonpRequest(path);
+  let payload = {};
+  try{ payload = options.body ? JSON.parse(options.body) : {}; }catch(e){ payload = {}; }
+  return postToAppsScript(path, method, payload);
+}
+async function loadData(){ DB = await api('/api/data'); return DB; }
+function fileToBase64(file){ return new Promise(resolve => { if(!file) return resolve(''); const r = new FileReader(); r.onload = () => resolve(r.result); r.readAsDataURL(file); }); }
+function logoHtml(){ const logo = DB?.settings?.logo || ''; return logo ? `<img src="${esc(logo)}" alt="logo" onerror="this.style.display='none'; this.parentElement.innerHTML='<i class=&quot;fa-solid fa-star&quot;></i>';">` : `<i class="fa-solid fa-star"></i>`; }
+function avatar(p, cls='avatar'){ return p?.photo ? `<img class="${cls}" src="${p.photo}" alt="${esc(p.name)}">` : `<div class="${cls}" style="display:grid;place-items:center"><i class="fa-solid fa-user"></i></div>`; }
+function toast(msg, type='gold'){
+  const host = $('toastHost');
+  const t = document.createElement('div');
+  t.className = `toast ${type}`;
+  t.innerHTML = `<i class="fa-solid ${type==='success'?'fa-circle-check':type==='error'?'fa-triangle-exclamation':'fa-star'}"></i><span>${esc(msg)}</span>`;
+  host.appendChild(t);
+  setTimeout(()=>{ t.style.opacity='0'; t.style.transform='translateY(15px)'; setTimeout(()=>t.remove(),250); }, 3200);
+}
+function beep(){
+  try{
+    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    const o = ctx.createOscillator(); const g = ctx.createGain();
+    o.connect(g); g.connect(ctx.destination); o.frequency.value = 880; g.gain.value = .08; o.start();
+    setTimeout(()=>{ o.stop(); ctx.close(); }, 130);
+  }catch(e){}
+}
+
+async function init(){
+  bind();
+  await loadData();
+  renderLoginBrand();
+  const s = JSON.parse(localStorage.getItem(SESSION_KEY) || 'null');
+  if(s){ currentUser = s; openApp(); }
+}
+function bind(){
+  $('loginBtn').addEventListener('click', login);
+  $('loginPass').addEventListener('keydown', e => { if(e.key === 'Enter') login(); });
+  $('logoutBtn').addEventListener('click', logout);
+  $('mobileToggle').addEventListener('click', () => $('sidebar').classList.toggle('open'));
+  $('modalClose').addEventListener('click', closeModal);
+  $('modal').addEventListener('click', e => { if(e.target.id === 'modal') closeModal(); });
+  if($('quickScanBtn')){ $('quickScanBtn').style.display='none'; $('quickScanBtn').onclick = null; }
+  $('backupBtn').addEventListener('click', openDatabaseFile);
+  $('importFile').addEventListener('change', async e => toast('الاستيراد المباشر غير مفعل في نسخة GitHub. يمكنك تعديل Google Sheet مباشرة أو طلب ميزة استيراد لاحقاً.'));
+  if(!API_URL.includes('PASTE_')) console.log('Apps Script API:', API_URL);
+}
+function renderLoginBrand(){
+  $('loginAcademyName').textContent = DB.settings.academyName;
+  $('loginLogoBox').innerHTML = logoHtml();
+}
+function login(){
+  const u = $('loginUser').value.trim(); const p = $('loginPass').value.trim();
+  const found = userList().find(x => String(x.username) === u && String(x.password) === p && isActiveUser(x));
+  if(!found){ $('loginError').textContent = 'اسم المستخدم أو كلمة المرور غير صحيحة أو الحساب غير مفعل'; return; }
+  currentUser = {
+    username:found.username,
+    role:found.role || 'custom',
+    name:found.displayName || found.name || found.username,
+    permissions:found.permissions || 'dashboard'
+  };
+  localStorage.setItem(SESSION_KEY, JSON.stringify(currentUser));
+  $('loginError').textContent = '';
+  openApp();
+}
+function logout(){ stopScanner(); localStorage.removeItem(SESSION_KEY); currentUser=null; $('appView').classList.add('hidden'); $('loginView').classList.remove('hidden'); renderLoginBrand(); }
+function openApp(){
+  $('loginView').classList.add('hidden'); $('appView').classList.remove('hidden');
+  $('sideAcademyName').textContent = DB.settings.academyName.replace('أكاديمية ', '');
+  $('brandLogo').innerHTML = logoHtml().replace('fa-star','fa-trophy');
+  $('roleName').textContent = currentUser.name;
+  renderMenu(); navigate('dashboard');
+}
+function renderMenu(){
+  $('menu').innerHTML = menuItems.filter(m => m.roles.includes(currentUser.role) || canAccess(m.id)).map(m => `
+    <button class="menu-item ${currentPage===m.id?'active':''}" data-page="${m.id}">
+      <i class="fa-solid ${m.icon}"></i><span>${m.title}</span>
+    </button>`).join('');
+  document.querySelectorAll('.menu-item').forEach(btn => btn.onclick = () => navigate(btn.dataset.page));
+}
+async function navigate(page){
+  if(REMOVED_PAGES.has(page)) page = 'dashboard';
+  stopScanner();
+  if(!canAccess(page)){
+    const first = menuItems.find(m => m.roles.includes(currentUser.role) || userPerms(currentUser).includes(m.id));
+    page = first?.id || 'dashboard';
+  }
+  currentPage = page; renderMenu();
+  const item = menuItems.find(x => x.id === page);
+  $('pageTitle').textContent = item?.title || 'النظام';
+  $('pageSubTitle').textContent = DB.settings.description || 'نظام إدارة أكاديمية رياضية أونلاين';
+  const map = { dashboard, players, finance, paymentsQuery, supervisors, settings };
+  map[page]();
+  $('sidebar').classList.remove('open');
+}
+
+function dashboard(){
+  const players = DB.players.length;
+  const revenue = DB.payments.reduce((s,p)=>s+paymentTotalPaid(p),0);
+  const outstanding = playerOutstandingList().reduce((s,x)=>s + x.finance.totalRemaining, 0);
+  const logs = DB.logs.slice(-10).reverse();
+  $('content').innerHTML = `
+    <div class="stats-grid">
+      ${stat('fa-person-running','إجمالي اللاعبين',players,'blue')}
+      ${stat('fa-wallet','إجمالي الإيرادات',money(revenue),'gold')}
+      <div class="stat-card red" onclick="showOutstandingDetails()" style="cursor:pointer" title="اضغط لعرض تفاصيل المبالغ المتبقية">
+        <div class="stat-icon"><i class="fa-solid fa-hand-holding-dollar"></i></div>
+        <div><span>المبالغ المتبقية</span><strong>${money(outstanding)}</strong></div>
+      </div>
+    </div>
+    <div class="panel">
+      <div class="panel-head"><h3><i class="fa-solid fa-clock-rotate-left"></i> آخر الحركات</h3><button class="btn btn-gold" onclick="openDatabaseFile()"><i class="fa-solid fa-table"></i> فتح قاعدة البيانات</button></div>
+      <div class="table-wrap"><table><thead><tr><th>النوع</th><th>الحركة</th><th>الوقت</th></tr></thead><tbody>
+        ${logs.length?logs.map(l=>`<tr><td><span class="badge">${esc(l.type)}</span></td><td>${esc(l.text)}</td><td>${esc(l.at)}</td></tr>`).join(''):'<tr><td colspan="3" class="empty">لا توجد حركات بعد</td></tr>'}
+      </tbody></table></div>
+    </div>`;
+}
+function showOutstandingDetails(){
+  const rows = playerOutstandingList();
+  const html = `<div class="panel" style="box-shadow:none;margin:0"><div class="panel-head"><h3><i class="fa-solid fa-hand-holding-dollar"></i> تفاصيل المبالغ المتبقية</h3><span class="badge danger">${money(rows.reduce((s,x)=>s+x.finance.totalRemaining,0))}</span></div>
+  <div class="table-wrap"><table><thead><tr><th>اللاعب</th><th>المدفوع</th><th>الاشتراكات الإضافية</th><th>المتبقي</th><th>إشعار</th></tr></thead><tbody>
+  ${rows.length?rows.map(({player, finance})=>`<tr><td>${esc(player.name)}</td><td>${money(finance.totalPaid)}</td><td>${esc(extrasNames(finance))}</td><td><b>${money(finance.totalRemaining)}</b><br><small>${esc(finance.breakdownText)}</small></td><td><button class="btn btn-sm btn-gold" onclick="sendPaymentReminder('${player.id}','partial')"><i class="fa-brands fa-whatsapp"></i> تذكير واتساب</button></td></tr>`).join(''):'<tr><td colspan="5" class="empty">لا توجد مبالغ متبقية حالياً</td></tr>'}
+  </tbody></table></div></div>`;
+  openModal(html);
+}
+function stat(icon,title,value,color){ return `<div class="stat-card ${color}"><div class="stat-icon"><i class="fa-solid ${icon}"></i></div><div><span>${title}</span><strong>${value}</strong></div></div>`; }
+
+function players(){
+  $('content').innerHTML = `
+    <div class="panel"><div class="panel-head"><h3><i class="fa-solid fa-user-plus"></i> إضافة لاعب</h3><span class="badge gold">بعد الحفظ ستجد البطاقة في السجل فقط</span></div>
+      <form id="playerForm" class="form-grid">
+        <div class="field"><label>اسم اللاعب</label><input id="pName" required placeholder="اسم اللاعب الكامل"></div>
+        <div class="field"><label>العمر</label><input id="pAge" type="number" min="3" placeholder="12"></div>
+        <div class="field"><label>الفئة الرياضية</label><input id="pCategory" placeholder="براعم / ناشئين / شباب"></div>
+        <div class="field"><label>هاتف ولي الأمر</label><input id="pPhone" placeholder="9639xxxxxxxx أو 09xxxxxxxx"></div>
+        <div class="field"><label>تاريخ التسجيل</label><input id="pDate" type="date" value="${today()}"></div>
+        <div class="field"><label>صورة شخصية</label><input id="pPhoto" type="file" accept="image/*"></div>
+        <button class="btn btn-gold span-2" type="submit"><i class="fa-solid fa-floppy-disk"></i> حفظ اللاعب وإضافته إلى السجل</button>
+      </form>
+    </div>
+    <div class="panel"><div class="panel-head players-head"><h3><i class="fa-solid fa-list"></i> سجل اللاعبين من Google Sheets</h3><div class="actions-row"><button class="btn btn-dark" id="printAllCards"><i class="fa-solid fa-print"></i> طباعة الكل</button><button class="btn btn-gold" id="printSelectedCards"><i class="fa-solid fa-id-card"></i> طباعة المحدد</button><input id="playerSearch" class="mini-input" placeholder="بحث سريع..."></div></div><div id="playersTable"></div></div>`;
+  $('playerForm').onsubmit = savePlayer;
+  $('playerSearch').oninput = renderPlayersTable;
+  $('printAllCards').onclick = () => printCards(DB.players);
+  $('printSelectedCards').onclick = () => { const ids=[...document.querySelectorAll('.player-check:checked')].map(x=>x.value); printCards(DB.players.filter(p=>ids.includes(String(p.id)))); };
+  renderPlayersTable();
+}
+async function savePlayer(e){
+  e.preventDefault();
+  const btn = currentSubmitButton(e);
+  const photo = await fileToBase64($('pPhoto').files[0]);
+  const payload = { id: uid('PLAYER'), name:$('pName').value.trim(), age:$('pAge').value, category:$('pCategory').value.trim(), phone:$('pPhone').value.trim(), registerDate:$('pDate').value, photo };
+  if(!payload.name) return toast('اسم اللاعب مطلوب','error');
+  setBtnBusy(btn, 'جاري حفظ اللاعب...'); setGlobalBusy('جاري حفظ اللاعب...');
+  try{
+    DB.players.push(payload);
+    toast('تم حفظ اللاعب وظهر في القائمة','success');
+    $('playerForm').reset(); $('pDate').value = today(); renderPlayersTable();
+    postFast('/api/players', 'POST', payload).catch(err => toast('تنبيه: تعذر إرسال اللاعب للسيرفر، تحقق من الاتصال','error'));
+    refreshDataInBackground(8000);
+  }catch(err){ toast(err.message,'error'); }
+  finally{ resetBtnBusy(btn); clearGlobalBusy(); }
+}
+function renderPlayersTable(){
+  const q = ($('playerSearch')?.value || '').trim();
+  const list = DB.players.filter(p => !q || String(p.name).includes(q) || String(p.category).includes(q) || String(p.phone).includes(q));
+  $('playersTable').innerHTML = `<div class="table-wrap"><table><thead><tr><th><input type="checkbox" id="checkAllPlayers"></th><th>الصورة</th><th>الاسم</th><th>العمر</th><th>الفئة</th><th>ولي الأمر</th><th>تاريخ التسجيل</th><th>بطاقة</th><th>حذف</th></tr></thead><tbody>
+    ${list.length?list.map(p=>`<tr><td><input class="player-check" type="checkbox" value="${esc(p.id)}"></td><td>${avatar(p)}</td><td>${esc(p.name)}</td><td>${esc(p.age)}</td><td>${esc(p.category)}</td><td>${esc(p.phone)}</td><td>${esc(p.registerDate)}</td><td><button class="btn btn-sm btn-gold" onclick="showCard('${p.id}')"><i class="fa-solid fa-id-card"></i> عرض/طباعة</button></td><td><button class="btn btn-sm btn-danger" onclick="deletePlayer('${p.id}', this)"><i class="fa-solid fa-trash"></i> حذف</button></td></tr>`).join(''):'<tr><td colspan="9" class="empty">لا يوجد لاعبون</td></tr>'}
+  </tbody></table></div>`;
+  const all = $('checkAllPlayers');
+  if(all) all.onchange = () => document.querySelectorAll('.player-check').forEach(c => c.checked = all.checked);
+}
+async function deletePlayer(id, btn){
+  const player = DB.players.find(p => String(p.id) === String(id));
+  if(!player) return toast('لم يتم العثور على اللاعب','error');
+
+  const msg = `هل تريد حذف اللاعب ${player.name}؟
+سيتم حذف اللاعب وجميع دفعاته المرتبطة به من قاعدة البيانات.`;
+  if(!confirm(msg)) return;
+
+  setBtnBusy(btn, 'جاري حذف اللاعب...');
+  setGlobalBusy('جاري حذف اللاعب ودفعاته...');
+
+  const oldPlayers = [...(DB.players || [])];
+  const oldPayments = [...(DB.payments || [])];
+  const oldAttendance = [...(DB.attendance || [])];
+
+  try{
+    // حذف فوري من الواجهة
+    DB.players = (DB.players || []).filter(p => String(p.id) !== String(id));
+    DB.payments = (DB.payments || []).filter(p =>
+      String(p.playerId) !== String(id) &&
+      String(p.playerName || '').trim() !== String(player.name || '').trim()
+    );
+    DB.attendance = (DB.attendance || []).filter(a =>
+      String(a.playerId) !== String(id) &&
+      String(a.playerName || '').trim() !== String(player.name || '').trim()
+    );
+
+    renderPlayersTable();
+    if(currentPage === 'dashboard') dashboard();
+    if(currentPage === 'finance') finance();
+
+    // حذف فعلي من Google Sheets وانتظار الرد حتى نتأكد أنه لم يبقَ دفعات
+    await api(`/api/players/${encodeURIComponent(id)}`, { method:'DELETE' });
+
+    // مزامنة سريعة بعد الحذف
+    try{
+      await loadData();
+      if(currentPage === 'players') renderPlayersTable();
+      if(currentPage === 'dashboard') dashboard();
+      if(currentPage === 'finance') finance();
+    }catch(e){}
+
+    toast('تم حذف اللاعب وجميع دفعاته بنجاح','success');
+  }catch(err){
+    // رجوع للبيانات القديمة إذا فشل السيرفر
+    DB.players = oldPlayers;
+    DB.payments = oldPayments;
+    DB.attendance = oldAttendance;
+    renderPlayersTable();
+    toast(err.message || 'تعذر حذف اللاعب من السيرفر','error');
+  }finally{
+    resetBtnBusy(btn);
+    clearGlobalBusy();
+  }
+}
+
+function playerCard(p, withPrint=false){
+  return `<div class="id-card-print" id="card-${esc(p.id)}">
+    <div class="id-bg-navy"></div><div class="id-bg-gold"></div><div class="id-net"></div>
+    <div class="id-title"><h2>${esc(DB.settings.academyName)}</h2><span>بطاقة لاعب</span></div>
+    <div class="id-logo">${logoHtml()}</div>
+    <div class="id-photo">${avatar(p,'id-photo-img')}</div>
+    <div class="id-info">
+      <h3><i class="fa-regular fa-user"></i> ${esc(p.name)}</h3>
+      <p><i class="fa-solid fa-shield-halved"></i> <b>الفئة:</b> ${esc(p.category || '-')}</p>
+      <p><i class="fa-regular fa-calendar"></i> <b>العمر:</b> ${esc(p.age || '-')}</p>
+      <small><b>ID:</b> ${esc(p.id)}</small>
+    </div>
+    <div id="qr-${esc(p.id)}" class="id-qr"></div>
+    <div class="id-ball"><i class="fa-solid fa-futbol"></i></div>
+  </div>${withPrint?`<div class="center-actions"><button class="btn btn-gold" onclick="printCards([DB.players.find(x=>x.id==='${p.id}')])"><i class="fa-solid fa-print"></i> طباعة البطاقة</button></div>`:''}`;
+}
+function showCard(id){ const p = DB.players.find(x=>x.id===id); openModal(playerCard(p,true)); setTimeout(()=>makeQR(`qr-${p.id}`, p.id),50); }
+function makeQR(id, text){ const el=$(id); if(el && window.QRCode){ el.innerHTML=''; new QRCode(el,{ text, width:130, height:130 }); } }
+
+function renderCardsForPrint(list){
+  return `<div class="bulk-print-toolbar no-print"><button class="btn btn-dark" onclick="printElement('bulkPrintArea')"><i class="fa-solid fa-print"></i> طباعة الآن</button><span class="badge gold">${list.length} بطاقة</span><span class="badge blue">ورقة A4 - 10 بطاقات تقريباً</span></div><div id="bulkPrintArea" class="a4-sheet">${list.map(p=>`<div class="card-slot">${playerCard(p,false)}</div>`).join('')}</div>`;
+}
+function printCards(list){
+  list = (list || []).filter(Boolean);
+  if(!list.length) return toast('اختر لاعباً واحداً على الأقل للطباعة','error');
+  openModal(renderCardsForPrint(list));
+  setTimeout(()=>list.forEach(p=>makeQR(`qr-${p.id}`, p.id)),80);
+}
+function qrAttendance(){
+  const nameOptions = DB.players.map(p=>`<option value="${esc(p.name)}">${esc(p.name)} - ${esc(p.category)}</option>`).join('');
+  $('content').innerHTML = `<div class="panel scan-panel"><div class="panel-head"><h3><i class="fa-solid fa-qrcode"></i> نقطة التفقد الذكي</h3><span class="badge blue">يدعم QR + إدخال ID أو الاسم</span></div><div id="reader" class="reader"></div><div class="manual-scan"><input id="manualCode" list="playersNames" placeholder="امسح البطاقة، أو اكتب ID، أو اكتب اسم اللاعب"><datalist id="playersNames">${nameOptions}</datalist><button class="btn btn-gold" id="manualBtn">تسجيل</button></div><div id="scanResult"></div></div>`;
+  $('manualBtn').onclick = () => handleScan($('manualCode').value.trim());
+  $('manualCode').addEventListener('keydown', e => { if(e.key==='Enter') handleScan(e.target.value.trim()); });
+  startScanner();
+}
+async function startScanner(){
+  if(!window.Html5Qrcode){
+    $('reader').innerHTML = '<div class="empty">مكتبة قراءة QR لم يتم تحميلها. تأكد من وجود إنترنت لأول مرة أو استخدم إدخال ID/الاسم يدوياً.</div>';
+    return;
+  }
+  if(!window.isSecureContext){
+    $('reader').innerHTML = '<div class="empty"><b>تنبيه مهم:</b><br>كاميرا الموبايل لا تعمل على رابط HTTP. افتح النظام من الموبايل بالرابط الذي يبدأ بـ <b>https://</b> مثل:<br><span style="direction:ltr;display:inline-block;margin-top:8px">https://IP:5443</span><br>ثم وافق على تحذير الأمان واسمح للكاميرا.</div>';
+    return;
+  }
+  try{
+    const formats = window.Html5QrcodeSupportedFormats ? [
+      Html5QrcodeSupportedFormats.QR_CODE,
+      Html5QrcodeSupportedFormats.CODE_128,
+      Html5QrcodeSupportedFormats.CODE_39,
+      Html5QrcodeSupportedFormats.EAN_13,
+      Html5QrcodeSupportedFormats.UPC_A
+    ].filter(Boolean) : undefined;
+    qrScanner = new Html5Qrcode('reader', formats ? { formatsToSupport: formats } : undefined);
+    const scanConfig = { fps:12, qrbox:{width:280,height:280}, aspectRatio:1.0 };
+    try{
+      await qrScanner.start({ facingMode: 'environment' }, scanConfig, code => handleScan(code));
+      return;
+    }catch(backCameraError){
+      const cams = await Html5Qrcode.getCameras();
+      if(cams && cams.length){
+        const preferred = cams.find(c => /back|rear|environment|خلف/i.test(c.label || '')) || cams[0];
+        await qrScanner.start(preferred.id, scanConfig, code => handleScan(code));
+        return;
+      }
+      throw backCameraError;
+    }
+  }catch(e){
+    $('reader').innerHTML = '<div class="empty">الكاميرا غير متاحة أو لم تتمكن من قراءة الرمز. تأكد أنك فتحت الرابط من HTTPS ووافقت على صلاحية الكاميرا، أو استخدم إدخال ID/الاسم يدوياً.</div>';
+  }
+}
+async function stopScanner(){ if(qrScanner){ try{ await qrScanner.stop(); await qrScanner.clear(); }catch(e){} qrScanner=null; } }
+let lastScanValue = '';
+let lastScanTime = 0;
+async function handleScan(code){
+  code = String(code||'').trim();
+  if(!code) return;
+  const now = Date.now();
+  if(code === lastScanValue && now - lastScanTime < 2500) return;
+  lastScanValue = code; lastScanTime = now;
+  const localMatch = DB.players.find(p => String(p.id) === code || String(p.name) === code || String(p.name).includes(code));
+  const query = localMatch ? localMatch.id : code;
+  beep();
+  try{
+    const res = await api('/api/attendance', { method:'POST', body:JSON.stringify({playerId:query, query:code}) });
+    await loadData();
+    const p = res.player;
+    $('scanResult').innerHTML = `<div class="scan-success"><div>${avatar(p,'success-photo')}</div><h2>${esc(p.name)}</h2><p>${res.already ? 'تم تسجيل حضوره مسبقاً اليوم' : 'تم تسجيل الحضور بنجاح'}</p><strong>${esc(res.time || '')}</strong></div>`;
+    if($('manualCode')) $('manualCode').value='';
+  }catch(e){ $('scanResult').innerHTML = `<div class="scan-error"><i class="fa-solid fa-triangle-exclamation"></i> ${esc(e.message)}</div>`; }
+}
+
+function finance(){
+  const opts = DB.players.map(p=>`<option value="${esc(p.name)}">${esc(p.name)} - ${esc(p.category)}</option>`).join('');
+  $('content').innerHTML = `<div class="panel"><div class="panel-head"><h3><i class="fa-solid fa-wallet"></i> تسجيل دفعة مالية</h3><span class="badge gold">اكتب اسم اللاعب بسرعة</span></div>
+    <form id="payForm" class="form-grid">
+      <div class="field span-2"><label>اسم اللاعب</label><input id="payPlayerName" list="payPlayersList" placeholder="ابدأ بكتابة اسم اللاعب..." autocomplete="off"><datalist id="payPlayersList">${opts}</datalist></div>
+      <div class="field"><label>المدفوع من رسم الاشتراك</label><input id="payAmount" type="number" value="${esc(DB.settings.defaultFee)}"></div>
+      <div class="field"><label>نوع الاشتراك</label><select id="payType"><option>شهري</option><option>سنوي</option></select></div>
+      <div class="field"><label>تاريخ الدفع</label><input id="payDate" type="date" value="${today()}"></div>
+      <div class="field"><label><input id="hasBus" type="checkbox"> مشترك بالباص <small>(${money(busFee())})</small></label><input id="payBusAmount" type="number" value="0" placeholder="المدفوع للباص"></div>
+      <div class="field"><label><input id="hasKit" type="checkbox"> طقم رياضي <small>(${money(kitFee())})</small></label><input id="payKitAmount" type="number" value="0" placeholder="المدفوع للطقم"></div>
+      <div class="field span-2"><div class="badge blue" id="paySummary">سيتم حساب المدفوع والمتبقي تلقائياً</div></div>
+      <button class="btn btn-gold" type="submit"><i class="fa-solid fa-receipt"></i> حفظ الدفعة</button>
+    </form></div><div class="panel"><div class="panel-head"><h3>سجل الدفعات</h3></div>${paymentsTable()}</div>`;
+  ['payAmount','payBusAmount','payKitAmount','hasBus','hasKit'].forEach(id => { const el=$(id); if(el) el.addEventListener('input', updatePaymentSummary); if(el) el.addEventListener('change', updatePaymentSummary); });
+  $('payForm').onsubmit = savePayment;
+  updatePaymentSummary();
+}
+function updatePaymentSummary(){
+  if(!$('paySummary')) return;
+  const mainPaid = num($('payAmount')?.value);
+  const hasBus = !!$('hasBus')?.checked;
+  const hasKit = !!$('hasKit')?.checked;
+  const busPaid = hasBus ? num($('payBusAmount')?.value) : 0;
+  const kitPaid = hasKit ? num($('payKitAmount')?.value) : 0;
+  const due = defaultFee() + (hasBus ? busFee() : 0) + (hasKit ? kitFee() : 0);
+  const paid = mainPaid + busPaid + kitPaid;
+  $('paySummary').textContent = `الإجمالي المطلوب: ${money(due)} | المدفوع الآن: ${money(paid)} | المتبقي المتوقع: ${money(Math.max(due-paid,0))}`;
+}
+async function savePayment(e){
+  e.preventDefault();
+  const btn = currentSubmitButton(e);
+  const player = findPlayerByNameOrId($('payPlayerName').value);
+  if(!player) return toast('اكتب اسم لاعب صحيح من القائمة','error');
+  const mainAmount = num($('payAmount').value);
+  const busIncluded = $('hasBus').checked;
+  const kitIncluded = $('hasKit').checked;
+  const busAmount = busIncluded ? num($('payBusAmount').value) : 0;
+  const kitAmount = kitIncluded ? num($('payKitAmount').value) : 0;
+  const totalPaid = mainAmount + busAmount + kitAmount;
+  if(!totalPaid) return toast('أدخل مبلغاً واحداً على الأقل','error');
+  const type = $('payType').value;
+  const paymentDate = $('payDate').value || today();
+  const totalDue = defaultFee() + (busIncluded ? busFee() : 0) + (kitIncluded ? kitFee() : 0);
+  const localPay = {
+    id: uid('PAY'), playerId: player.id, playerName: player.name,
+    amount: totalPaid, mainAmount, busIncluded: busIncluded ? '1' : '', busAmount,
+    kitIncluded: kitIncluded ? '1' : '', kitAmount, totalDue, totalRemaining: Math.max(totalDue-totalPaid,0),
+    type, paymentDate, expireDate: calcExpireDate(paymentDate, type), createdAt: nowAr(), _pending: true
+  };
+  setBtnBusy(btn, 'جاري حفظ الدفعة...'); setGlobalBusy('جاري حفظ الدفعة...');
+  try{
+    DB.payments.push(localPay);
+    toast('تم الحفظ وظهرت الدفعة في السجل','success');
+    $('payForm').reset(); $('payDate').value = today(); $('payAmount').value = DB.settings.defaultFee || defaultFee(); updatePaymentSummary();
+    finance();
+    postFast('/api/payments', 'POST', localPay).catch(err => toast('تنبيه: تعذر إرسال الدفعة للسيرفر، تحقق من الاتصال', 'error'));
+    refreshDataInBackground(7000);
+  }catch(err){ toast(err.message,'error'); }
+  finally{ resetBtnBusy(btn); clearGlobalBusy(); }
+}
+function paymentsTable(){ return `<div class="table-wrap"><table><thead><tr><th>اللاعب</th><th>رسم الاشتراك</th><th>الباص</th><th>الطقم</th><th>الإجمالي المدفوع</th><th>التاريخ</th><th>إرسال الإيصال</th></tr></thead><tbody>${DB.payments.length?DB.payments.slice().reverse().map(p=>`<tr><td>${esc(p.playerName)} ${p._pending?'<span class="badge gold">قيد المزامنة</span>':''}</td><td>${money(paymentMainPaid(p))}</td><td>${paymentBusIncluded(p)?money(num(p.busAmount)):'-'}</td><td>${paymentKitIncluded(p)?money(num(p.kitAmount)):'-'}</td><td>${money(paymentTotalPaid(p))}</td><td>${esc(displayDate(p.paymentDate))}</td><td><button class="btn btn-sm btn-gold" onclick="sendReceiptWhatsApp('${p.id}')"><i class="fa-brands fa-whatsapp"></i> واتساب</button></td></tr>`).join(''):'<tr><td colspan="7" class="empty">لا توجد دفعات</td></tr>'}</tbody></table></div>`; }
+function buildReceiptMessage(p){
+  return `إيصال دفع من ${DB.settings.academyName}\n\nاللاعب: ${p.playerName}\nرسم الاشتراك المدفوع: ${money(paymentMainPaid(p))}\nالباص: ${paymentBusIncluded(p) ? money(num(p.busAmount)) : 'غير مشترك'}\nالطقم الرياضي: ${paymentKitIncluded(p) ? money(num(p.kitAmount)) : 'غير مشترك'}\nإجمالي المدفوع: ${money(paymentTotalPaid(p))}\nنوع الاشتراك: ${p.type}\nتاريخ الدفع: ${displayDate(p.paymentDate)}\nتاريخ الانتهاء: ${displayDate(p.expireDate)}\n\nشكراً لثقتكم بنا 🌟`;
+}
+function sendReceiptSms(id){
+  // توافق مع أي زر قديم: تم تحويل الإرسال من SMS إلى واتساب.
+  return sendReceiptWhatsApp(id);
+}
+function sendReceiptWhatsApp(id){
+  const p = DB.payments.find(x=>String(x.id)===String(id));
+  if(!p) return toast('لم يتم العثور على الدفعة','error');
+  const player = DB.players.find(x=>String(x.id)===String(p.playerId)) || {};
+  waLink(player.phone || player.guardianPhone || '', buildReceiptMessage(p));
+}
+function receipt(p){ return `<div class="receipt" id="receipt-${p.id}"><div class="receipt-logo">${logoHtml()}</div><h2>${esc(DB.settings.academyName)}</h2><p>${esc(DB.settings.address)}</p><hr><h3>إيصال دفع</h3><p><b>اللاعب:</b> ${esc(p.playerName)}</p><p><b>رسم الاشتراك:</b> ${money(paymentMainPaid(p))}</p><p><b>الباص:</b> ${paymentBusIncluded(p)?money(num(p.busAmount)):'غير مشترك'}</p><p><b>الطقم:</b> ${paymentKitIncluded(p)?money(num(p.kitAmount)):'غير مشترك'}</p><p><b>الإجمالي:</b> ${money(paymentTotalPaid(p))}</p><p><b>تاريخ الدفع:</b> ${esc(displayDate(p.paymentDate))}</p><p><b>تاريخ الانتهاء:</b> ${esc(displayDate(p.expireDate))}</p><small>${nowAr()}</small><button class="btn btn-gold" onclick="sendReceiptWhatsApp('${p.id}')"><i class="fa-brands fa-whatsapp"></i> إرسال عبر واتساب</button></div>`; }
+function printReceipt(id){ sendReceiptWhatsApp(id); }
+
+function paymentsQuery(){
+  const opts = DB.players.map(p=>`<option value="${esc(p.name)}">${esc(p.name)} - ${esc(p.category)}</option>`).join('');
+  $('content').innerHTML = `<div class="panel query-panel"><div class="panel-head"><h3><i class="fa-solid fa-magnifying-glass-dollar"></i> الاستعلام الذكي عن الدفعات</h3></div><input id="queryInput" class="big-search" list="queryNames" placeholder="اكتب اسم اللاعب أو امسح QR"><datalist id="queryNames">${opts}</datalist><div id="queryResult"></div></div>`;
+  $('queryInput').oninput = () => queryPayment($('queryInput').value.trim());
+  $('queryInput').addEventListener('keydown', e => { if(e.key==='Enter') queryPayment(e.target.value.trim()); });
+}
+function getPlayerFinance(player){
+  const pays = DB.payments.filter(x=>String(x.playerId)===String(player.id)).sort((a,b)=>String(b.expireDate).localeCompare(String(a.expireDate)) || String(b.createdAt).localeCompare(String(a.createdAt)));
+  const last = pays[0] || null;
+  const fee = defaultFee();
+  const mainPaid = pays.reduce((s,p)=>s+paymentMainPaid(p),0);
+  const busSubscribed = pays.some(paymentBusIncluded);
+  const kitSubscribed = pays.some(paymentKitIncluded);
+  const busPaid = pays.reduce((s,p)=>s+num(p.busAmount),0);
+  const kitPaid = pays.reduce((s,p)=>s+num(p.kitAmount),0);
+  const mainRemaining = Math.max(fee - mainPaid, 0);
+  const busRemaining = busSubscribed ? Math.max(busFee() - busPaid, 0) : 0;
+  const kitRemaining = kitSubscribed ? Math.max(kitFee() - kitPaid, 0) : 0;
+  const totalPaid = mainPaid + busPaid + kitPaid;
+  const totalDue = fee + (busSubscribed ? busFee() : 0) + (kitSubscribed ? kitFee() : 0);
+  const totalRemaining = mainRemaining + busRemaining + kitRemaining;
+  const active = !!(last && String(last.expireDate) >= today());
+  const complete = active && totalRemaining <= 0;
+  const parts = [];
+  if(mainRemaining>0) parts.push(`رسم الاشتراك: ${money(mainRemaining)}`);
+  if(busRemaining>0) parts.push(`الباص: ${money(busRemaining)}`);
+  if(kitRemaining>0) parts.push(`الطقم: ${money(kitRemaining)}`);
+  return { pays, last, fee, mainPaid, busPaid, kitPaid, busSubscribed, kitSubscribed, mainRemaining, busRemaining, kitRemaining, totalPaid, totalDue, totalRemaining, remaining:totalRemaining, active, complete, breakdownText: parts.join(' / ') || 'لا يوجد مبالغ متبقية' };
+}
+function queryPayment(q){
+  if(!q){ $('queryResult').innerHTML=''; return; }
+  const p = DB.players.find(x => String(x.id)===q || String(x.name)===q || String(x.name).includes(q));
+  if(!p){ $('queryResult').innerHTML = `<div class="scan-error">لا يوجد لاعب مطابق</div>`; return; }
+  const f = getPlayerFinance(p);
+  const statusClass = f.active ? (f.complete ? 'active' : 'partial') : 'expired';
+  const statusText = f.active ? 'الاشتراك ساري' : 'الاشتراك منتهي أو لا توجد دفعات';
+  const payText = f.complete ? 'حالة الدفع: مكتمل' : `حالة الدفع: باقي ${money(f.totalRemaining)}`;
+  const reminderBtn = f.totalRemaining > 0
+    ? `<button class="btn btn-gold" onclick="sendPaymentReminder('${p.id}','partial')"><i class="fa-brands fa-whatsapp"></i> إرسال تذكير بإكمال الدفع</button>`
+    : (!f.active ? `<button class="btn btn-danger" onclick="sendPaymentReminder('${p.id}','expired')"><i class="fa-brands fa-whatsapp"></i> إرسال رسالة تجديد الاشتراك</button>` : '');
+  $('queryResult').innerHTML = `<div class="payment-status ${statusClass}">
+    ${avatar(p,'success-photo')}
+    <h2>${esc(p.name)}</h2>
+    <h3>${statusText}</h3>
+    <p><b>${payText}</b></p>
+    <div class="table-wrap" style="margin-top:12px"><table><tbody>
+      <tr><th>رسم الاشتراك</th><td>مدفوع: ${money(f.mainPaid)} / متبقي: ${money(f.mainRemaining)}</td></tr>
+      <tr><th>الباص</th><td>${f.busSubscribed ? `مدفوع: ${money(f.busPaid)} / متبقي: ${money(f.busRemaining)}` : 'غير مشترك'}</td></tr>
+      <tr><th>الطقم الرياضي</th><td>${f.kitSubscribed ? `مدفوع: ${money(f.kitPaid)} / متبقي: ${money(f.kitRemaining)}` : 'غير مشترك'}</td></tr>
+      <tr><th>الإجمالي</th><td>مدفوع: ${money(f.totalPaid)} / متبقي: <b>${money(f.totalRemaining)}</b></td></tr>
+    </tbody></table></div>
+    ${f.last?`<p>آخر دفعة: <b>${money(paymentTotalPaid(f.last))}</b> | تاريخ الانتهاء: <b>${esc(displayDate(f.last.expireDate))}</b></p>`:`<p>لا توجد أي دفعة مسجلة لهذا اللاعب.</p>`}
+    <div class="actions-row center-actions">${reminderBtn}</div>
+  </div>`;
+}
+function sendPaymentReminder(id, type){
+  const p = DB.players.find(x=>x.id===id);
+  if(!p) return;
+  const f = getPlayerFinance(p);
+  const msg = f.totalRemaining > 0
+    ? `تحية طيبة من إدارة ${DB.settings.academyName}. نذكّركم بأن اللاعب ${p.name} لديه مبلغ متبقٍ قدره ${money(f.totalRemaining)}. التفاصيل: ${f.breakdownText}. نرجو إكمال الدفع، ونتمنى له دوام التميز والنجاح.`
+    : `تحية طيبة من إدارة ${DB.settings.academyName}. نود إعلامكم بأن اشتراك البطل ${p.name} يحتاج إلى متابعة وتجديد للاستمرار في التدريب. بانتظاركم ليستمر بطلنا بخطواته نحو التميز.`;
+  waLink(p.phone, msg);
+}
+
+function absences(){
+  const attended = new Set(DB.attendance.filter(a=>String(a.date)===today()).map(a=>String(a.playerId)));
+  const absent = DB.players.filter(p=>!attended.has(String(p.id)));
+  $('content').innerHTML = `<div class="panel"><div class="panel-head"><h3><i class="fa-solid fa-user-xmark"></i> غيابات اليوم ${today()}</h3><span class="badge danger">${absent.length} غائب</span></div><div class="table-wrap"><table><thead><tr><th>اللاعب</th><th>الفئة</th><th>هاتف ولي الأمر</th><th>تنبيه</th></tr></thead><tbody>${absent.length?absent.map(p=>`<tr><td>${avatar(p)} ${esc(p.name)}</td><td>${esc(p.category)}</td><td>${esc(p.phone)}</td><td><button class="btn btn-sm btn-gold" onclick="whatsapp('${p.id}')"><i class="fa-brands fa-whatsapp"></i> تنبيه ولي الأمر</button></td></tr>`).join(''):'<tr><td colspan="4" class="empty">لا يوجد غياب اليوم</td></tr>'}</tbody></table></div></div>`;
+}
+function whatsapp(id){
+  const p = DB.players.find(x=>x.id===id);
+  const msg = `تحية طيبة من إدارة ${DB.settings.academyName}، نود إعلامكم بأن البطل ${p.name} لم يحضر تدريب اليوم.`;
+  waLink(p.phone, msg);
+}
+
+function roleLabel(role){ return role==='admin'?'مدير عام':role==='finance'?'قسم المالية':'مشرف مخصص'; }
+function defaultPermsForRole(role){
+  if(role==='admin') return 'all';
+  if(role==='finance') return 'dashboard,finance,paymentsQuery';
+  return 'dashboard';
+}
+function supervisors(){
+  const perms = menuItems.filter(m=>m.id!=='supervisors').map(m=>`<label class="perm-check"><input type="checkbox" value="${m.id}"> ${m.title}</label>`).join('');
+  $('content').innerHTML = `<div class="panel"><div class="panel-head"><h3><i class="fa-solid fa-user-plus"></i> تعيين مشرف أو إداري</h3><span class="badge gold">المدير فقط يستطيع إنشاء الحسابات</span></div>
+    <form id="userForm" class="form-grid">
+      <div class="field"><label>اسم المشرف</label><input id="uDisplay" placeholder="مثال: مشرف الحضور"></div>
+      <div class="field"><label>اسم المستخدم للدخول</label><input id="uName" placeholder="مثال: coach1"></div>
+      <div class="field"><label>كلمة المرور</label><input id="uPass" placeholder="كلمة مرور سهلة للمشرف"></div>
+      <div class="field"><label>نوع الحساب</label><select id="uRole"><option value="custom">مشرف مخصص</option><option value="finance">مالية</option><option value="admin">مدير عام</option></select></div>
+      <div class="field full"><label>تحديد الصلاحيات التي ستظهر للمشرف</label><div class="permissions-grid" id="permBox">${perms}</div></div>
+      <button class="btn btn-gold full" type="submit"><i class="fa-solid fa-floppy-disk"></i> حفظ المشرف والصلاحيات</button>
+    </form></div>
+    <div class="panel"><div class="panel-head"><h3><i class="fa-solid fa-users-gear"></i> حسابات الدخول</h3></div><div id="usersTable"></div></div>`;
+  $('uRole').onchange = () => applyRolePerms($('uRole').value);
+  $('userForm').onsubmit = saveUser;
+  applyRolePerms('custom');
+  renderUsersTable();
+}
+function applyRolePerms(role){
+  const perms = defaultPermsForRole(role);
+  document.querySelectorAll('#permBox input').forEach(c => c.checked = perms==='all' || perms.split(',').includes(c.value));
+}
+function selectedPerms(){ return [...document.querySelectorAll('#permBox input:checked')].map(x=>x.value).join(','); }
+async function saveUser(e){
+  e.preventDefault();
+  const role = $('uRole').value;
+  const payload = { username:$('uName').value.trim(), password:$('uPass').value.trim(), displayName:$('uDisplay').value.trim() || $('uName').value.trim(), role, permissions: role==='admin' ? 'all' : selectedPerms(), active:'1' };
+  if(!payload.username || !payload.password) return toast('اسم المستخدم وكلمة المرور مطلوبان','error');
+  try{ await api('/api/users',{method:'POST', body:JSON.stringify(payload)}); await loadData(); toast('تم إنشاء المشرف بنجاح','success'); supervisors(); }
+  catch(err){ toast(err.message,'error'); }
+}
+function renderUsersTable(){
+  const rows = userList();
+  $('usersTable').innerHTML = `<div class="table-wrap"><table><thead><tr><th>الاسم</th><th>اسم المستخدم</th><th>الدور</th><th>الصلاحيات</th><th>الحالة</th><th>إجراءات</th></tr></thead><tbody>${rows.map(u=>`<tr><td>${esc(u.displayName||u.name||u.username)}</td><td>${esc(u.username)}</td><td>${roleLabel(u.role)}</td><td>${esc(u.permissions)}</td><td>${isActiveUser(u)?'<span class="badge green">مفعل</span>':'<span class="badge red">موقوف</span>'}</td><td>${u.username==='admin'?'<span class="badge gold">أساسي</span>':`<button class="btn btn-sm btn-danger" onclick="deleteUser('${esc(u.username)}')"><i class="fa-solid fa-trash"></i> حذف</button>`}</td></tr>`).join('')}</tbody></table></div>`;
+}
+async function deleteUser(username){
+  if(!confirm('هل تريد حذف هذا الحساب؟')) return;
+  try{ await api(`/api/users/${encodeURIComponent(username)}`, {method:'DELETE'}); await loadData(); renderUsersTable(); toast('تم حذف الحساب','success'); }
+  catch(err){ toast(err.message,'error'); }
+}
+function settings(){
+  const s = DB.settings;
+  $('content').innerHTML = `<div class="panel"><div class="panel-head"><h3><i class="fa-solid fa-gear"></i> إعدادات المؤسسة</h3></div><form id="settingsForm" class="form-grid"><div class="field"><label>اسم الأكاديمية</label><input id="sName" value="${esc(s.academyName)}"></div><div class="field"><label>الاسم الإنجليزي</label><input id="sEn" value="${esc(s.academyEn)}"></div><div class="field span-2"><label>الوصف</label><input id="sDesc" value="${esc(s.description)}"></div><div class="field span-2"><label>العنوان</label><input id="sAddress" value="${esc(s.address)}"></div><div class="field"><label>قيمة الاشتراك الافتراضية</label><input id="sFee" type="number" value="${esc(s.defaultFee)}"></div><div class="field"><label>رسم الباص</label><input id="sBusFee" type="number" value="${esc(s.busFee || 200000)}" placeholder="200000"></div><div class="field"><label>سعر الطقم الرياضي</label><input id="sKitFee" type="number" value="${esc(s.kitFee || 100000)}" placeholder="100000"></div><div class="field"><label>تغيير الشعار</label><input id="sLogo" type="file" accept="image/*"></div><button class="btn btn-gold span-2" type="submit"><i class="fa-solid fa-floppy-disk"></i> حفظ الإعدادات داخل Google Sheets</button></form></div>`;
+  $('settingsForm').onsubmit = saveSettings;
+}
+async function saveSettings(e){
+  e.preventDefault();
+  const btn = currentSubmitButton(e);
+  setBtnBusy(btn, 'جاري حفظ الإعدادات...'); setGlobalBusy('جاري حفظ الإعدادات...');
+  try{
+    const logo = await fileToBase64($('sLogo').files[0]);
+    const payload = { academyName:$('sName').value, academyEn:$('sEn').value, description:$('sDesc').value, address:$('sAddress').value, defaultFee:$('sFee').value, busFee:$('sBusFee').value, kitFee:$('sKitFee').value };
+    if(logo) payload.logo = logo;
+    await api('/api/settings', { method:'PUT', body:JSON.stringify(payload) });
+    await loadData(); toast('تم حفظ الإعدادات داخل Google Sheets','success'); openApp();
+  }catch(err){ toast(err.message,'error'); }
+  finally{ resetBtnBusy(btn); clearGlobalBusy(); }
+}
+
+function openModal(html){ $('modalContent').innerHTML = html; $('modal').classList.remove('hidden'); }
+function closeModal(){ $('modal').classList.add('hidden'); $('modalContent').innerHTML=''; }
+function printElement(id){
+  const el = document.getElementById(id);
+  if(!el){ toast('لم يتم العثور على عنصر الطباعة','error'); return; }
+  const printable = el.cloneNode(true);
+  printable.querySelectorAll('canvas').forEach(canvas => {
+    const img = document.createElement('img');
+    try { img.src = canvas.toDataURL('image/png'); } catch(e) {}
+    img.width = canvas.width || 130; img.height = canvas.height || 130;
+    canvas.replaceWith(img);
+  });
+  const iframe = document.createElement('iframe');
+  iframe.style.position = 'fixed';
+  iframe.style.left = '-9999px';
+  iframe.style.top = '0';
+  iframe.style.width = '1px';
+  iframe.style.height = '1px';
+  document.body.appendChild(iframe);
+  const doc = iframe.contentWindow.document;
+  doc.open();
+  doc.write(`<html dir="rtl"><head><title>طباعة</title><link href="https://fonts.googleapis.com/css2?family=Cairo:wght@400;700;900&display=swap" rel="stylesheet"><style>
+  @page{size:A4 portrait;margin:8mm}*{box-sizing:border-box}body{font-family:Cairo,Arial;margin:0;padding:0;background:white;text-align:center;color:#07111f}button,.no-print{display:none!important}img{max-width:100%}
+  .a4-sheet{width:194mm;margin:auto;display:grid;grid-template-columns:repeat(2,85.6mm);gap:6mm 8mm;align-content:start;justify-content:center;padding:2mm;background:white}.card-slot{break-inside:avoid;page-break-inside:avoid}
+  .id-card-print{width:85.6mm;height:54mm;position:relative;overflow:hidden;border:0.35mm solid #d7ad37;border-radius:4mm;background:#fff;box-shadow:none;text-align:right;margin:auto;break-inside:avoid;page-break-inside:avoid}.id-bg-navy{position:absolute;right:0;top:0;width:62%;height:19mm;background:#07111f;clip-path:polygon(0 0,100% 0,100% 100%,17% 100%)}.id-bg-gold{position:absolute;left:0;bottom:0;width:30mm;height:30mm;background:#d7ad37;clip-path:polygon(0 0,100% 100%,0 100%);opacity:.95}.id-net{position:absolute;left:3mm;top:11mm;width:31mm;height:31mm;background:linear-gradient(60deg,rgba(215,173,55,.14) 25%,transparent 25% 50%,rgba(215,173,55,.14) 50% 75%,transparent 75%);background-size:5mm 5mm;opacity:.45}.id-title{position:absolute;right:7mm;top:3mm;color:white;z-index:2}.id-title h2{margin:0;color:#f6d978;font-size:13px;font-weight:900}.id-title span{display:block;text-align:center;font-size:8px}.id-logo{position:absolute;left:5mm;top:4mm;width:18mm;height:18mm;display:grid;place-items:center;overflow:hidden;z-index:3;color:#d7ad37}.id-logo img{width:100%;height:100%;object-fit:contain}.id-photo{position:absolute;right:7mm;top:19mm;width:25mm;height:29mm;border:1mm solid #f6d978;border-radius:4mm;overflow:hidden;background:#f3f4f6;z-index:3}.id-photo-img{width:100%;height:100%;object-fit:cover}.id-info{position:absolute;right:35mm;top:20mm;width:24mm;z-index:3}.id-info h3{margin:0 0 2mm;font-size:13px;font-weight:900}.id-info p{margin:1.5mm 0;font-size:7.5px}.id-info small{display:block;margin-top:2mm;font-size:5.5px;direction:ltr;text-align:left}.id-qr{position:absolute;left:6mm;bottom:7mm;width:20mm;height:20mm;background:white;border:.4mm solid #d7ad37;border-radius:2mm;padding:1.2mm;display:grid;place-items:center;z-index:4}.id-qr img,.id-qr canvas{width:17mm!important;height:17mm!important}.id-ball{position:absolute;right:2.5mm;bottom:2.5mm;color:white;font-size:10px;z-index:4}.receipt{max-width:420px;margin:20px auto;border:2px solid #d4af37;border-radius:22px;padding:20px}.receipt-logo{width:74px;height:74px;border-radius:50%;background:#07111f;color:#d4af37;display:grid;place-items:center;margin:0 auto 10px;overflow:hidden;font-size:32px}.receipt-logo img{width:100%;height:100%;object-fit:contain}
+  </style></head><body>${printable.outerHTML}</body></html>`);
+  doc.close();
+  setTimeout(() => {
+    try{ iframe.contentWindow.focus(); iframe.contentWindow.print(); }
+    finally{ setTimeout(()=>iframe.remove(), 1200); }
+  }, 450);
+}
+
+async function openDatabaseFile(){
+  try{
+    const res = await jsonpRequest('/api/database-url');
+    if(res.url) window.open(res.url, '_blank');
+    else toast('لم يتم العثور على رابط قاعدة البيانات','error');
+  }catch(err){ toast(err.message,'error'); }
+}
+
+init().catch(err => { console.error(err); alert('حدث خطأ أثناء تشغيل النظام: ' + err.message); });
