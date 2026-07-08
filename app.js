@@ -10,11 +10,21 @@ const REMOVED_PAGES = new Set(['qrAttendance','absences']);
 const $ = id => document.getElementById(id);
 const today = () => new Date().toISOString().slice(0, 10);
 const nowAr = () => new Date().toLocaleString('ar-SY');
-const money = n => `${Number(n || 0).toLocaleString('ar-SY')} ل.س`;
-const defaultFee = () => Number(DB?.settings?.defaultFee || 0);
-const busFee = () => Number(DB?.settings?.busFee || 200000);
-const kitFee = () => Number(DB?.settings?.kitFee || 100000);
-const num = v => Number(v || 0);
+function num(v){
+  if(v === null || v === undefined || v === '') return 0;
+  if(typeof v === 'number') return isFinite(v) ? v : 0;
+  let s = String(v).trim();
+  const ar = '٠١٢٣٤٥٦٧٨٩';
+  const fa = '۰۱۲۳۴۵۶۷۸۹';
+  s = s.replace(/[٠-٩]/g, d => String(ar.indexOf(d))).replace(/[۰-۹]/g, d => String(fa.indexOf(d)));
+  s = s.replace(/[,،\s]/g, '').replace(/[^0-9.\-]/g, '');
+  const n = Number(s);
+  return isFinite(n) ? n : 0;
+}
+const money = n => `${num(n).toLocaleString('ar-SY')} ل.س`;
+const defaultFee = () => num(DB?.settings?.defaultFee || 0);
+const busFee = () => num(DB?.settings?.busFee || 200000);
+const kitFee = () => num(DB?.settings?.kitFee || 100000);
 function normalizePhone(phone){ let p = String(phone||'').replace(/[^0-9]/g,''); if(p.startsWith('00')) p = p.slice(2); if(p.startsWith('0')) p = '963' + p.slice(1); return p; }
 function waLink(phone, msg){ const p = normalizePhone(phone); if(!p){ toast('رقم ولي الأمر غير موجود','error'); return; } window.open(`https://wa.me/${p}?text=${encodeURIComponent(msg)}`,'_blank'); }
 const esc = v => String(v ?? '').replace(/[&<>'"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));
@@ -102,10 +112,9 @@ function paymentMainPaid(p){ return num(p.mainAmount !== undefined && p.mainAmou
 function paymentBusIncluded(p){ return String(p.busIncluded || '').toLowerCase() === 'true' || String(p.busIncluded) === '1' || num(p.busAmount) > 0; }
 function paymentKitIncluded(p){ return String(p.kitIncluded || '').toLowerCase() === 'true' || String(p.kitIncluded) === '1' || num(p.kitAmount) > 0; }
 function paymentTotalPaid(p){
-  if(p.mainAmount !== undefined || p.busAmount !== undefined || p.kitAmount !== undefined){
-    return paymentMainPaid(p) + num(p.busAmount) + num(p.kitAmount);
-  }
-  return num(p.amount);
+  const detailed = num(p.mainAmount) + num(p.busAmount) + num(p.kitAmount);
+  const amount = num(p.amount);
+  return Math.max(detailed, amount, 0);
 }
 function paymentExtrasText(p){
   const parts = [];
@@ -121,6 +130,15 @@ function extrasNames(finance){
 }
 function playerOutstandingList(){
   return (DB.players || []).map(player => ({ player, finance:getPlayerFinance(player) })).filter(x => x.finance.totalRemaining > 0);
+}
+function totalRevenue(){
+  // إجمالي الإيرادات يجب أن يعتمد على كل الدفعات المسجلة، وليس على المبالغ المتبقية.
+  // هكذا يبقى الرقم ثابتاً حتى لو أصبح المتبقي صفر بعد إكمال الأقساط.
+  return (DB.payments || []).reduce((sum, p) => {
+    const detailed = num(p.mainAmount) + num(p.busAmount) + num(p.kitAmount);
+    const amount = num(p.amount);
+    return sum + Math.max(detailed, amount, 0);
+  }, 0);
 }
 
 const fallbackUsers = [
@@ -303,7 +321,7 @@ async function navigate(page){
 
 function dashboard(){
   const players = DB.players.length;
-  const revenue = DB.payments.reduce((s,p)=>s+paymentTotalPaid(p),0);
+  const revenue = totalRevenue();
   const outstanding = playerOutstandingList().reduce((s,x)=>s + x.finance.totalRemaining, 0);
   const logs = DB.logs.slice(-10).reverse();
   $('content').innerHTML = `
@@ -526,23 +544,57 @@ async function handleScan(code){
 
 function finance(){
   const opts = DB.players.map(p=>`<option value="${esc(p.name)}">${esc(p.name)} - ${esc(p.category)}</option>`).join('');
-  $('content').innerHTML = `<div class="panel"><div class="panel-head"><h3><i class="fa-solid fa-wallet"></i> تسجيل دفعة مالية</h3><span class="badge gold">اكتب اسم اللاعب بسرعة</span></div>
+  $('content').innerHTML = `<div class="panel"><div class="panel-head"><h3><i class="fa-solid fa-wallet"></i> تسجيل دفعة مالية</h3><span class="badge gold">الترتيب الجديد: اسم اللاعب ← نوع العملية ← تفاصيل الدفعة</span></div>
     <form id="payForm" class="form-grid">
-      <div class="field span-2"><label>اسم اللاعب</label><input id="payPlayerName" list="payPlayersList" placeholder="ابدأ بكتابة اسم اللاعب..." autocomplete="off"><datalist id="payPlayersList">${opts}</datalist></div>
-      <div class="field"><label>المدفوع من رسم الاشتراك</label><input id="payAmount" type="number" value="${esc(DB.settings.defaultFee)}"></div>
+      <div class="field span-2"><label>1) اسم اللاعب</label><input id="payPlayerName" list="payPlayersList" placeholder="ابدأ بكتابة اسم اللاعب..." autocomplete="off"><datalist id="payPlayersList">${opts}</datalist></div>
+
+      <div class="field"><label>2) نوع العملية</label><select id="payMode"><option value="new">اشتراك جديد</option><option value="installment">تنزيل دفعة</option></select></div>
       <div class="field"><label>نوع الاشتراك</label><select id="payType"><option>شهري</option><option>سنوي</option></select></div>
       <div class="field"><label>تاريخ الدفع</label><input id="payDate" type="date" value="${today()}"></div>
-      <div class="field"><label><input id="hasBus" type="checkbox"> مشترك بالباص <small>(${money(busFee())})</small></label><input id="payBusAmount" type="number" value="0" placeholder="المدفوع للباص"></div>
-      <div class="field"><label><input id="hasKit" type="checkbox"> طقم رياضي <small>(${money(kitFee())})</small></label><input id="payKitAmount" type="number" value="0" placeholder="المدفوع للطقم"></div>
+
+      <div id="installmentBox" class="field span-2" style="display:none">
+        <label>3) الدفعة على حساب</label>
+        <select id="payTarget">
+          <option value="main">قسط الاشتراك</option>
+          <option value="bus">قسط الباص</option>
+          <option value="kit">قسط الطقم</option>
+        </select>
+      </div>
+
+      <div id="newSubscriptionBox" class="span-2 form-grid" style="display:contents">
+        <div class="field"><label>المدفوع من رسم الاشتراك</label><input id="payAmount" type="number" value="${esc(DB.settings.defaultFee)}"></div>
+        <div class="field"><label><input id="hasBus" type="checkbox"> مشترك بالباص <small>(${money(busFee())})</small></label><input id="payBusAmount" type="number" value="0" placeholder="المدفوع للباص"></div>
+        <div class="field"><label><input id="hasKit" type="checkbox"> طقم رياضي <small>(${money(kitFee())})</small></label><input id="payKitAmount" type="number" value="0" placeholder="المدفوع للطقم"></div>
+      </div>
+
+      <div id="installmentAmountBox" class="field span-2" style="display:none"><label>قيمة الدفعة</label><input id="payInstallmentAmount" type="number" value="0" placeholder="اكتب قيمة الدفعة"></div>
+
       <div class="field span-2"><div class="badge blue" id="paySummary">سيتم حساب المدفوع والمتبقي تلقائياً</div></div>
       <button class="btn btn-gold" type="submit"><i class="fa-solid fa-receipt"></i> حفظ الدفعة</button>
     </form></div><div class="panel"><div class="panel-head"><h3>سجل الدفعات</h3></div>${paymentsTable()}</div>`;
-  ['payAmount','payBusAmount','payKitAmount','hasBus','hasKit'].forEach(id => { const el=$(id); if(el) el.addEventListener('input', updatePaymentSummary); if(el) el.addEventListener('change', updatePaymentSummary); });
+  ['payAmount','payBusAmount','payKitAmount','payInstallmentAmount','hasBus','hasKit','payMode','payTarget'].forEach(id => { const el=$(id); if(el) el.addEventListener('input', updatePaymentSummary); if(el) el.addEventListener('change', updatePaymentSummary); });
   $('payForm').onsubmit = savePayment;
   updatePaymentSummary();
 }
 function updatePaymentSummary(){
   if(!$('paySummary')) return;
+  const mode = $('payMode')?.value || 'new';
+  const newBox = $('newSubscriptionBox');
+  const installmentBox = $('installmentBox');
+  const installmentAmountBox = $('installmentAmountBox');
+  if(newBox) newBox.style.display = mode === 'new' ? 'contents' : 'none';
+  if(installmentBox) installmentBox.style.display = mode === 'installment' ? 'block' : 'none';
+  if(installmentAmountBox) installmentAmountBox.style.display = mode === 'installment' ? 'block' : 'none';
+
+  if(mode === 'installment'){
+    const target = $('payTarget')?.value || 'main';
+    const paid = num($('payInstallmentAmount')?.value);
+    const label = target === 'bus' ? 'قسط الباص' : (target === 'kit' ? 'قسط الطقم' : 'قسط الاشتراك');
+    const due = target === 'bus' ? busFee() : (target === 'kit' ? kitFee() : defaultFee());
+    $('paySummary').textContent = `${label} | قيمة البند: ${money(due)} | المدفوع الآن: ${money(paid)} | المتبقي المتوقع على هذا البند: ${money(Math.max(due-paid,0))}`;
+    return;
+  }
+
   const mainPaid = num($('payAmount')?.value);
   const hasBus = !!$('hasBus')?.checked;
   const hasKit = !!$('hasKit')?.checked;
@@ -550,43 +602,66 @@ function updatePaymentSummary(){
   const kitPaid = hasKit ? num($('payKitAmount')?.value) : 0;
   const due = defaultFee() + (hasBus ? busFee() : 0) + (hasKit ? kitFee() : 0);
   const paid = mainPaid + busPaid + kitPaid;
-  $('paySummary').textContent = `الإجمالي المطلوب: ${money(due)} | المدفوع الآن: ${money(paid)} | المتبقي المتوقع: ${money(Math.max(due-paid,0))}`;
+  $('paySummary').textContent = `اشتراك جديد | الإجمالي المطلوب: ${money(due)} | المدفوع الآن: ${money(paid)} | المتبقي المتوقع: ${money(Math.max(due-paid,0))}`;
 }
 async function savePayment(e){
   e.preventDefault();
   const btn = currentSubmitButton(e);
   const player = findPlayerByNameOrId($('payPlayerName').value);
   if(!player) return toast('اكتب اسم لاعب صحيح من القائمة','error');
-  const mainAmount = num($('payAmount').value);
-  const busIncluded = $('hasBus').checked;
-  const kitIncluded = $('hasKit').checked;
-  const busAmount = busIncluded ? num($('payBusAmount').value) : 0;
-  const kitAmount = kitIncluded ? num($('payKitAmount').value) : 0;
-  const totalPaid = mainAmount + busAmount + kitAmount;
-  if(!totalPaid) return toast('أدخل مبلغاً واحداً على الأقل','error');
+
+  const mode = $('payMode').value || 'new';
   const type = $('payType').value;
   const paymentDate = $('payDate').value || today();
+  let mainAmount = 0, busIncluded = false, kitIncluded = false, busAmount = 0, kitAmount = 0, operationLabel = 'اشتراك جديد';
+
+  if(mode === 'installment'){
+    const target = $('payTarget').value || 'main';
+    const amount = num($('payInstallmentAmount').value);
+    if(!amount) return toast('أدخل قيمة الدفعة','error');
+    if(target === 'bus'){
+      busIncluded = true; busAmount = amount; operationLabel = 'تنزيل دفعة - قسط الباص';
+    }else if(target === 'kit'){
+      kitIncluded = true; kitAmount = amount; operationLabel = 'تنزيل دفعة - قسط الطقم';
+    }else{
+      mainAmount = amount; operationLabel = 'تنزيل دفعة - قسط الاشتراك';
+    }
+  }else{
+    mainAmount = num($('payAmount').value);
+    busIncluded = $('hasBus').checked;
+    kitIncluded = $('hasKit').checked;
+    busAmount = busIncluded ? num($('payBusAmount').value) : 0;
+    kitAmount = kitIncluded ? num($('payKitAmount').value) : 0;
+  }
+
+  const totalPaid = mainAmount + busAmount + kitAmount;
+  if(!totalPaid) return toast('أدخل مبلغاً واحداً على الأقل','error');
   const totalDue = defaultFee() + (busIncluded ? busFee() : 0) + (kitIncluded ? kitFee() : 0);
   const localPay = {
     id: uid('PAY'), playerId: player.id, playerName: player.name,
     amount: totalPaid, mainAmount, busIncluded: busIncluded ? '1' : '', busAmount,
     kitIncluded: kitIncluded ? '1' : '', kitAmount, totalDue, totalRemaining: Math.max(totalDue-totalPaid,0),
-    type, paymentDate, expireDate: calcExpireDate(paymentDate, type), createdAt: nowAr(), _pending: true
+    type, paymentDate, expireDate: calcExpireDate(paymentDate, type), createdAt: nowAr(), paymentMode: mode, paymentTarget: mode === 'installment' ? ($('payTarget').value || 'main') : 'new', operationLabel, _pending: true
   };
   setBtnBusy(btn, 'جاري حفظ الدفعة...'); setGlobalBusy('جاري حفظ الدفعة...');
   try{
     DB.payments.push(localPay);
     toast('تم الحفظ وظهرت الدفعة في السجل','success');
-    $('payForm').reset(); $('payDate').value = today(); $('payAmount').value = DB.settings.defaultFee || defaultFee(); updatePaymentSummary();
+    $('payForm').reset();
+    $('payDate').value = today();
+    $('payMode').value = 'new';
+    $('payAmount').value = DB.settings.defaultFee || defaultFee();
+    updatePaymentSummary();
     finance();
     postFast('/api/payments', 'POST', localPay).catch(err => toast('تنبيه: تعذر إرسال الدفعة للسيرفر، تحقق من الاتصال', 'error'));
     refreshDataInBackground(7000);
   }catch(err){ toast(err.message,'error'); }
   finally{ resetBtnBusy(btn); clearGlobalBusy(); }
 }
-function paymentsTable(){ return `<div class="table-wrap"><table><thead><tr><th>اللاعب</th><th>رسم الاشتراك</th><th>الباص</th><th>الطقم</th><th>الإجمالي المدفوع</th><th>التاريخ</th><th>إرسال الإيصال</th></tr></thead><tbody>${DB.payments.length?DB.payments.slice().reverse().map(p=>`<tr><td>${esc(p.playerName)} ${p._pending?'<span class="badge gold">قيد المزامنة</span>':''}</td><td>${money(paymentMainPaid(p))}</td><td>${paymentBusIncluded(p)?money(num(p.busAmount)):'-'}</td><td>${paymentKitIncluded(p)?money(num(p.kitAmount)):'-'}</td><td>${money(paymentTotalPaid(p))}</td><td>${esc(displayDate(p.paymentDate))}</td><td><button class="btn btn-sm btn-gold" onclick="sendReceiptWhatsApp('${p.id}')"><i class="fa-brands fa-whatsapp"></i> واتساب</button></td></tr>`).join(''):'<tr><td colspan="7" class="empty">لا توجد دفعات</td></tr>'}</tbody></table></div>`; }
+function paymentsTable(){ return `<div class="table-wrap"><table><thead><tr><th>اللاعب</th><th>نوع العملية</th><th>رسم الاشتراك</th><th>الباص</th><th>الطقم</th><th>الإجمالي المدفوع</th><th>التاريخ</th><th>إرسال الإيصال</th></tr></thead><tbody>${DB.payments.length?DB.payments.slice().reverse().map(p=>`<tr><td>${esc(p.playerName)} ${p._pending?'<span class="badge gold">قيد المزامنة</span>':''}</td><td>${esc(p.operationLabel || paymentOperationText(p))}</td><td>${money(paymentMainPaid(p))}</td><td>${paymentBusIncluded(p)?money(num(p.busAmount)):'-'}</td><td>${paymentKitIncluded(p)?money(num(p.kitAmount)):'-'}</td><td>${money(paymentTotalPaid(p))}</td><td>${esc(displayDate(p.paymentDate))}</td><td><button class="btn btn-sm btn-gold" onclick="sendReceiptWhatsApp('${p.id}')"><i class="fa-brands fa-whatsapp"></i> واتساب</button></td></tr>`).join(''):'<tr><td colspan="8" class="empty">لا توجد دفعات</td></tr>'}</tbody></table></div>`; }
+function paymentOperationText(p){ if(String(p.paymentMode)==='installment'){ const t=String(p.paymentTarget||'main'); return t==='bus'?'تنزيل دفعة - قسط الباص':(t==='kit'?'تنزيل دفعة - قسط الطقم':'تنزيل دفعة - قسط الاشتراك'); } return 'اشتراك جديد'; }
 function buildReceiptMessage(p){
-  return `إيصال دفع من ${DB.settings.academyName}\n\nاللاعب: ${p.playerName}\nرسم الاشتراك المدفوع: ${money(paymentMainPaid(p))}\nالباص: ${paymentBusIncluded(p) ? money(num(p.busAmount)) : 'غير مشترك'}\nالطقم الرياضي: ${paymentKitIncluded(p) ? money(num(p.kitAmount)) : 'غير مشترك'}\nإجمالي المدفوع: ${money(paymentTotalPaid(p))}\nنوع الاشتراك: ${p.type}\nتاريخ الدفع: ${displayDate(p.paymentDate)}\nتاريخ الانتهاء: ${displayDate(p.expireDate)}\n\nشكراً لثقتكم بنا 🌟`;
+  return `إيصال دفع من ${DB.settings.academyName}\n\nاللاعب: ${p.playerName}\nنوع العملية: ${p.operationLabel || paymentOperationText(p)}\nرسم الاشتراك المدفوع: ${money(paymentMainPaid(p))}\nالباص: ${paymentBusIncluded(p) ? money(num(p.busAmount)) : 'غير مشترك'}\nالطقم الرياضي: ${paymentKitIncluded(p) ? money(num(p.kitAmount)) : 'غير مشترك'}\nإجمالي المدفوع: ${money(paymentTotalPaid(p))}\nنوع الاشتراك: ${p.type}\nتاريخ الدفع: ${displayDate(p.paymentDate)}\nتاريخ الانتهاء: ${displayDate(p.expireDate)}\n\nشكراً لثقتكم بنا 🌟`;
 }
 function sendReceiptSms(id){
   // توافق مع أي زر قديم: تم تحويل الإرسال من SMS إلى واتساب.
@@ -598,7 +673,7 @@ function sendReceiptWhatsApp(id){
   const player = DB.players.find(x=>String(x.id)===String(p.playerId)) || {};
   waLink(player.phone || player.guardianPhone || '', buildReceiptMessage(p));
 }
-function receipt(p){ return `<div class="receipt" id="receipt-${p.id}"><div class="receipt-logo">${logoHtml()}</div><h2>${esc(DB.settings.academyName)}</h2><p>${esc(DB.settings.address)}</p><hr><h3>إيصال دفع</h3><p><b>اللاعب:</b> ${esc(p.playerName)}</p><p><b>رسم الاشتراك:</b> ${money(paymentMainPaid(p))}</p><p><b>الباص:</b> ${paymentBusIncluded(p)?money(num(p.busAmount)):'غير مشترك'}</p><p><b>الطقم:</b> ${paymentKitIncluded(p)?money(num(p.kitAmount)):'غير مشترك'}</p><p><b>الإجمالي:</b> ${money(paymentTotalPaid(p))}</p><p><b>تاريخ الدفع:</b> ${esc(displayDate(p.paymentDate))}</p><p><b>تاريخ الانتهاء:</b> ${esc(displayDate(p.expireDate))}</p><small>${nowAr()}</small><button class="btn btn-gold" onclick="sendReceiptWhatsApp('${p.id}')"><i class="fa-brands fa-whatsapp"></i> إرسال عبر واتساب</button></div>`; }
+function receipt(p){ return `<div class="receipt" id="receipt-${p.id}"><div class="receipt-logo">${logoHtml()}</div><h2>${esc(DB.settings.academyName)}</h2><p>${esc(DB.settings.address)}</p><hr><h3>إيصال دفع</h3><p><b>اللاعب:</b> ${esc(p.playerName)}</p><p><b>نوع العملية:</b> ${esc(p.operationLabel || paymentOperationText(p))}</p><p><b>رسم الاشتراك:</b> ${money(paymentMainPaid(p))}</p><p><b>الباص:</b> ${paymentBusIncluded(p)?money(num(p.busAmount)):'غير مشترك'}</p><p><b>الطقم:</b> ${paymentKitIncluded(p)?money(num(p.kitAmount)):'غير مشترك'}</p><p><b>الإجمالي:</b> ${money(paymentTotalPaid(p))}</p><p><b>تاريخ الدفع:</b> ${esc(displayDate(p.paymentDate))}</p><p><b>تاريخ الانتهاء:</b> ${esc(displayDate(p.expireDate))}</p><small>${nowAr()}</small><button class="btn btn-gold" onclick="sendReceiptWhatsApp('${p.id}')"><i class="fa-brands fa-whatsapp"></i> إرسال عبر واتساب</button></div>`; }
 function printReceipt(id){ sendReceiptWhatsApp(id); }
 
 function paymentsQuery(){
